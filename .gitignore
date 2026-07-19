@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+
+# Rust
+target/
+
+# Maturin — compiled extension dropped here during `maturin develop`, not source
+sidol/_sidol_core*.pyd
+sidol/_sidol_core*.so
+sidol/_sidol_core*.pdb
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/

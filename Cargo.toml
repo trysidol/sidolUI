@@ -1,0 +1,25 @@
+# Rust workspace root for the Sidol engine.
+#
+# Python calls into this single cdylib via PyO3. Everything performance-
+# sensitive (reactive graph, layout, rendering) lives here.
+#
+# One crate, not a workspace — no consumers want graph.rs without lib.rs
+# yet. Split when the GPU surface grows a standalone test harness.
+#
+# `abi3-py312`: compiled .pyd works across Python 3.12+ without a rebuild
+# per version. We don't need the free-threaded ABI — Rust owns concurrency.
+
+[package]
+name = "sidol_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust reactive core engine for the Sidol UI framework"
+license = "MIT"
+
+[lib]
+name = "_sidol_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }

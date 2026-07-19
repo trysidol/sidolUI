@@ -1,0 +1,46 @@
+# maturin builds the Rust cdylib and wires it into Python's import system.
+# Runtime deps: zero — sidol does nothing without its native extension.
+# Dev deps: pytest, ruff.
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sidol"
+version = "0.1.0"
+description = "A reactive Python UI framework backed by a Rust engine."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Development Status :: 2 - Pre-Alpha",
+    "Topic :: Software Development :: User Interfaces",
+]
+
+[project.scripts]
+sidol = "sidol.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "sidol._sidol_core"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
