@@ -17,10 +17,14 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::*;
 use std::sync::Mutex;
 
 mod graph;
 use graph::{Graph as CoreGraph, SignalId};
+
+mod layout;
+mod render;
 
 #[pyclass(name = "Graph")]
 struct PyGraph {
@@ -97,8 +101,92 @@ impl PyGraph {
     }
 }
 
+/// Compute flexbox layout for a Python Node tree.
+/// Returns a list of `{kind, x, y, w, h}` dicts in pre-order traversal.
+#[pyfunction]
+fn compute_layout(
+    py: Python<'_>,
+    root: &Bound<PyAny>,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> PyResult<Py<PyAny>> {
+    layout::compute_layout(py, root, viewport_w, viewport_h)
+}
+
+#[pyfunction]
+fn tui_init() -> PyResult<()> {
+    render::init().map_err(|e| PyRuntimeError::new_err(e))
+}
+
+#[pyfunction]
+fn tui_cleanup() -> PyResult<()> {
+    render::cleanup().map_err(|e| PyRuntimeError::new_err(e))
+}
+
+#[pyfunction]
+fn tui_size() -> PyResult<(u16, u16)> {
+    render::get_size().map_err(|e| PyRuntimeError::new_err(e))
+}
+
+#[pyfunction]
+fn tui_render_frame(
+    rects: &Bound<PyAny>,
+    focused_idx: i32,
+) -> PyResult<String> {
+    let layout_rects = parse_rects(rects)?;
+    render::render_frame(&layout_rects, focused_idx)
+        .map_err(|e| PyRuntimeError::new_err(e))
+}
+
+/// Parse a Python list of layout dicts into a Vec<render::LayoutRect>.
+fn parse_rects(rects: &Bound<PyAny>) -> PyResult<Vec<render::LayoutRect>> {
+    let list = rects.cast::<PyList>()?;
+    let mut result = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let d = item.cast::<PyDict>()?;
+        let kind = match d.get_item("kind") {
+            Ok(Some(v)) => v.extract::<String>().unwrap_or_default(),
+            _ => String::new(),
+        };
+        let x = match d.get_item("x") {
+            Ok(Some(v)) => v.extract::<f32>().unwrap_or(0.0),
+            _ => 0.0,
+        };
+        let y = match d.get_item("y") {
+            Ok(Some(v)) => v.extract::<f32>().unwrap_or(0.0),
+            _ => 0.0,
+        };
+        let w = match d.get_item("w") {
+            Ok(Some(v)) => v.extract::<f32>().unwrap_or(0.0),
+            _ => 0.0,
+        };
+        let h = match d.get_item("h") {
+            Ok(Some(v)) => v.extract::<f32>().unwrap_or(0.0),
+            _ => 0.0,
+        };
+        let text = match d.get_item("text") {
+            Ok(Some(v)) => v.extract::<String>().unwrap_or_default(),
+            _ => String::new(),
+        };
+        result.push(render::LayoutRect {
+            kind,
+            x,
+            y,
+            w,
+            h,
+            text,
+        });
+    }
+    Ok(result)
+}
+
 #[pymodule]
 fn _sidol_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraph>()?;
+    m.add_function(wrap_pyfunction!(compute_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(tui_init, m)?)?;
+    m.add_function(wrap_pyfunction!(tui_cleanup, m)?)?;
+    m.add_function(wrap_pyfunction!(tui_size, m)?)?;
+    m.add_function(wrap_pyfunction!(tui_render_frame, m)?)?;
     Ok(())
 }

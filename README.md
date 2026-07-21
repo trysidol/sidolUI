@@ -69,18 +69,21 @@ tree = app.build_tree()   # ✅ declarative Node tree
 
 ## What works today
 
-- [x] Reactive signal graph (Rust) — create signals, declare dependencies, propagate dirty
-- [x] Auto-tracking — reading `State` during `view()` registers the dependency automatically
-- [x] Stale-edge pruning — conditional dependencies are cleaned up before every re-render
-- [x] PyO3 bridge — Python calls into Rust; GIL is never held in the engine hot path
+- [x] Reactive signal graph (Rust) — create, depend, mark-dirty, propagate
+- [x] Auto-tracking — reading `State` during `view()` registers dependencies automatically
+- [x] Stale-edge pruning — conditional dependencies clean up on re-render
+- [x] PyO3 bridge — Python calls into Rust, zero GIL in the engine hot path
+- [x] Taffy layout engine — flexbox/grid, `Row`/`Column`/`Spacer` with spacing
+- [x] Headless surface — `print_layout()` dumps computed box tree as text
+- [x] Render loop — `flush()` processes dirty components with re-entrancy protection
 - [x] Test isolation — `reset_graph()` for clean per-test state
 
 ## What's next
 
 | Phase | Surface | Status |
 |-------|---------|--------|
-| 0 | Headless box-tree dump | 🔜 Next |
-| 1 | TUI (`ratatui`) | ⬜ |
+| 5/6 | Layout + headless | ✅ |
+| 1 | TUI (`ratatui`) | ⬜ Next |
 | 2 | GPU (`wgpu` + `tiny-skia`) | ⬜ |
 
 ---

@@ -26,7 +26,11 @@ classifiers = [
 sidol = "sidol.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.8"]
+dev = [
+    "maturin>=1.14.1",
+    "pytest>=8",
+    "ruff>=0.8",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
