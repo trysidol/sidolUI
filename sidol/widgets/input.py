@@ -10,13 +10,13 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from sidol.node import Node
-from sidol.theme import Style, get_theme
+from sidol.theme import Style, get_theme, resolve_style
 
 
 def Text(
     content: str,
     *,
-    size: int = 14,
+    size: int | None = None,
     weight: str = "normal",
     fg: str | None = None,
     bg: str | None = None,
@@ -24,15 +24,17 @@ def Text(
     on_focus: Callable[..., object] | None = None,
 ) -> Node:
     theme = get_theme()
+    resolved = resolve_style(theme, default_fg=theme.colors.text)
     return Node(
         kind="text",
         props={
             "content": content,
-            "size": size,
+            "size": size if size is not None else theme.typography.size,
             "weight": weight,
-            "fg": fg or theme.colors.text,
-            "bg": bg or "",
+            "fg": fg or resolved["color"],
+            "bg": bg or resolved["bg"],
             "variant": "",
+            "radius": resolved["radius"],
         },
         on_key=on_key,
         on_focus=on_focus,
@@ -51,17 +53,23 @@ def Button(
     on_focus: Callable[..., object] | None = None,
 ) -> Node:
     theme = get_theme()
-    resolved_fg = fg or (style.color if style else None) or theme.colors.primary
-    resolved_bg = bg or (style.bg if style else None) or theme.colors.surface
-    variant = (style.variant if style else None) or "filled"
+    resolved = resolve_style(
+        theme,
+        style,
+        default_fg=theme.colors.primary,
+        default_bg=theme.colors.surface,
+        default_variant="filled",
+        default_radius=6,
+    )
     return Node(
         kind="button",
         props={
             "label": label,
             "disabled": disabled,
-            "fg": resolved_fg,
-            "bg": resolved_bg,
-            "variant": variant,
+            "fg": fg or resolved["color"],
+            "bg": bg or resolved["bg"],
+            "variant": resolved["variant"],
+            "radius": resolved["radius"],
         },
         on_click=on_click,
         on_key=on_key,

@@ -1319,10 +1319,91 @@ def test_scrollview_builds_tree() -> None:
     from sidol.widgets import Text
     from sidol.widgets.scroll import ScrollView
 
-    node = ScrollView(Text("content"), max_h=50)
+    node = ScrollView(Text("content"), max_h=50).rendered_view()
     assert node.kind == "scroll_view"
     assert node.props["max_h"] == 50.0
     assert len(node.children) == 1
+    assert node.props["scroll_x"] == 0
+    assert node.props["scroll_y"] == 0
+
+
+def test_scrollview_scroll_state_clamps_at_zero() -> None:
+    from sidol.widgets import Text
+    from sidol.widgets.scroll import ScrollView
+
+    sv = ScrollView(Text("a"), max_h=50)
+    assert sv.scroll_y == 0
+    sv.scroll_by(dy=-5)
+    assert sv.scroll_y == 0
+    sv.scroll_by(dy=5)
+    assert sv.scroll_y == 5
+    sv.scroll_to(y=10)
+    assert sv.scroll_y == 10
+    sv.scroll_to(y=-3)
+    assert sv.scroll_y == 0
+
+
+def test_scrollview_rects_carry_scroll_offset() -> None:
+    from sidol.widgets import Column, Text
+    from sidol.widgets.scroll import ScrollView
+
+    class Scroller(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scroller = ScrollView(
+                Column(Text("a"), Text("b"), Text("c")),
+                max_h=20,
+            )
+
+        def view(self):
+            return self.scroller
+
+    app = App(Scroller())
+    app.root.scroller.scroll_to(y=4)
+    rects = app.compute_layout(200, 150)
+    scroll_rect = next(r for r in rects if r["kind"] == "scroll_view")
+    assert scroll_rect["scroll_y"] == 4.0
+
+
+def test_scrollview_keyboard_scrolls_when_focused() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, Text
+    from sidol.widgets.scroll import ScrollView
+
+    class Scroller(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scroller = ScrollView(
+                Column(Text("a"), Text("b"), Text("c")),
+                max_h=20,
+            )
+
+        def view(self):
+            return self.scroller
+
+    app = App(Scroller())
+    tree = app.build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+    assert len(targets) == 1  # the scroll view is focusable
+
+    sv = app.root.scroller
+    assert sv.scroll_y == 0
+    _tui_step(
+        surface, "key@down", 0, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert sv.scroll_y == 1
+    _tui_step(
+        surface, "key@down", 0, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert sv.scroll_y == 2
+    _tui_step(
+        surface, "key@up", 0, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert sv.scroll_y == 1
 
 
 def test_scrollview_layout_produces_rects() -> None:
@@ -1756,3 +1837,359 @@ def test_worker_join_requires_start() -> None:
 
     with pytest.raises(RuntimeError, match="started before join"):
         Worker(lambda: None).join()
+
+
+def _tui_step(surface, event, focused, *, callbacks, button_callbacks, targets, rects):
+    """Helper: run one pure TUI dispatch step."""
+    return surface._dispatch(
+        event,
+        focused,
+        callbacks=callbacks,
+        button_callbacks=button_callbacks,
+        targets=targets,
+        rects=rects,
+    )
+
+
+def test_tui_dispatch_focus_navigation_and_activation() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    called: list[str] = []
+    tree = Column(
+        Button("a", on_click=lambda: called.append("a")),
+        Button("b", on_click=lambda: called.append("b")),
+    )
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    callbacks = surface._focus_callbacks(tree)
+    button_callbacks = surface._button_callbacks(tree)
+    targets = surface._focus_targets(tree)
+    rects: list[dict] = []
+
+    focused = -1
+    focused, quit = _tui_step(
+        surface, "focus_next", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert (focused, quit) == (0, False)
+    _tui_step(
+        surface, "activate", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert called == ["a"]
+
+    focused, _ = _tui_step(
+        surface, "focus_next", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert focused == 1
+    _tui_step(
+        surface, "activate", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert called == ["a", "b"]
+
+    focused, _ = _tui_step(
+        surface, "focus_prev", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert focused == 0
+
+    _, quit = _tui_step(
+        surface, "quit", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert quit is True
+
+
+def test_tui_dispatch_keyboard_typing_to_textfield() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, TextField
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.field = TextField(initial="")
+
+        def view(self) -> Node:
+            return Column(self.field)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+    assert len(targets) == 1
+    focused = 0
+
+    for char in "hi":
+        focused, _ = _tui_step(
+            surface, f"key@{char}", focused, callbacks=[],
+            button_callbacks=[], targets=targets, rects=[],
+        )
+    assert form.field.value == "hi"
+
+    focused, _ = _tui_step(
+        surface, "key@backspace", focused, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert form.field.value == "h"
+
+    focused, _ = _tui_step(
+        surface, "key@home", focused, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    focused, _ = _tui_step(
+        surface, "key@a", focused, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert form.field.value == "ah"
+
+
+def test_tui_mouse_click_dispatches_button() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    called: list[str] = []
+    tree = Column(
+        Button("one", on_click=lambda: called.append("one")),
+        Button("two", on_click=lambda: called.append("two")),
+    )
+    app = App(None)  # type: ignore[arg-type]
+    rects = app.compute_layout(200, 100, tree=tree)
+    button_rects = [r for r in rects if r["kind"] == "button"]
+    assert len(button_rects) >= 2
+
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    button_callbacks = surface._button_callbacks(tree)
+
+    second = button_rects[1]
+    _tui_step(
+        surface,
+        f"click@{second['x'] + second['w'] / 2:.0f}@{second['y'] + second['h'] / 2:.0f}",
+        -1,
+        callbacks=[],
+        button_callbacks=button_callbacks,
+        targets=[],
+        rects=rects,
+    )
+    assert called == ["two"]
+
+    called.clear()
+    _tui_step(
+        surface, "click@999@999", -1, callbacks=[],
+        button_callbacks=button_callbacks, targets=[], rects=rects,
+    )
+    assert called == []
+
+
+def test_tui_run_loop_quits_and_cleans_up(monkeypatch) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Column(Button("x", on_click=lambda: None))
+
+    init_calls: list[int] = []
+    cleanup_calls: list[int] = []
+    events = iter(["quit"])
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: init_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+    )
+
+    TuiSurface(App(Root())).run()
+    assert init_calls == [1]
+    assert cleanup_calls == [1]
+
+
+def test_tui_cleanup_runs_when_rendering_raises(monkeypatch) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("hi")
+
+    cleanup_calls: list[int] = []
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+
+    def boom(rects, idx) -> str:
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(tui_module, "tui_render_frame", boom)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        TuiSurface(App(Root())).run()
+    assert cleanup_calls == [1]
+
+
+def test_tui_hot_reload_swaps_app_on_file_change(monkeypatch, tmp_path) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    watched = tmp_path / "app.py"
+    watched.write_text("app = 1\n")
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("one")
+
+    new_root = Root()
+    reloader_calls: list[str] = []
+
+    def reloader(path: str):
+        reloader_calls.append(path)
+        return App(new_root)
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    events = iter(["tick", "quit"])
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+    )
+
+    surface = TuiSurface(App(Root()), watch=[str(watched)], reloader=reloader)
+    # Force a change to be detected on the first tick.
+    surface._last_mtimes[str(watched)] = 0
+    surface.run()
+
+    assert reloader_calls == [str(watched)]
+    assert surface._app.root is new_root
+
+
+def test_tui_hot_reload_keeps_app_when_reloader_returns_none(
+    monkeypatch, tmp_path
+) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    watched = tmp_path / "app.py"
+    watched.write_text("app = 1\n")
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("one")
+
+    reloader_calls: list[str] = []
+
+    def reloader(path: str):
+        reloader_calls.append(path)
+        return None
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    events = iter(["tick", "quit"])
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+    )
+
+    original = App(Root())
+    surface = TuiSurface(original, watch=[str(watched)], reloader=reloader)
+    surface._last_mtimes[str(watched)] = 0
+    surface.run()
+
+    assert reloader_calls == [str(watched)]
+    assert surface._app is original
+
+
+def test_cli_reloader_re_executes_module(tmp_path) -> None:
+    import importlib.util
+
+    from sidol.cli import _reloader
+
+    app_file = tmp_path / "app.py"
+    app_file.write_text("app = 1\n")
+    spec = importlib.util.spec_from_file_location("reload_mod", str(app_file))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    reload = _reloader(module)
+    assert module.app == 1
+
+    app_file.write_text("app = 2\n")
+    assert reload(str(app_file)) == 2
+    assert module.app == 2
+
+
+def test_resolve_style_precedence() -> None:
+    from sidol.theme import Colors, Style, Theme, Typography, resolve_style
+
+    theme = Theme(
+        colors=Colors(primary="#111111", text="#222222"),
+        typography=Typography(size=20),
+    )
+    defaults = resolve_style(
+        theme,
+        default_fg=theme.colors.primary,
+        default_bg=theme.colors.surface,
+        default_radius=6,
+    )
+    assert defaults["color"] == "#111111"
+    assert defaults["bg"] == "#FFFFFF"
+    assert defaults["variant"] == "filled"
+    assert defaults["radius"] == 6
+    assert defaults["font_size"] == 20
+
+    overridden = resolve_style(
+        theme,
+        Style(color="#FF0000", radius=3, variant="ghost"),
+        default_fg=theme.colors.primary,
+        default_radius=6,
+    )
+    assert overridden["color"] == "#FF0000"
+    assert overridden["variant"] == "ghost"
+    assert overridden["radius"] == 3
+
+
+def test_button_radius_flows_through_layout() -> None:
+    from sidol._sidol_core import compute_layout
+
+    from sidol.theme import Style
+    from sidol.widgets import Button
+
+    def button_rect(node):
+        return next(r for r in compute_layout(node, 200, 100) if r["kind"] == "button")
+
+    assert button_rect(Button("Go"))["radius"] == 6.0
+    assert button_rect(Button("Go", style=Style(radius=12)))["radius"] == 12.0
+
+
+def test_html_uses_themed_radius_and_spacing() -> None:
+    from sidol._sidol_core import compute_layout
+
+    from sidol.surfaces.html import _nest_by_depth
+    from sidol.theme import Colors, Spacing, Style, Theme, Typography, set_theme
+    from sidol.widgets import Button
+
+    set_theme(
+        Theme(
+            colors=Colors(primary="#123456"),
+            spacing=Spacing(unit=8),
+            typography=Typography(size=18),
+        )
+    )
+    try:
+        rects = compute_layout(Button("Go"), 200, 100)
+        body = _nest_by_depth(rects)
+        assert "border-radius:6px" in body
+        assert "padding:8px" in body
+        assert "font-size:18px" in body
+
+        rounded = compute_layout(Button("Go", style=Style(radius=12)), 200, 100)
+        assert "border-radius:12px" in _nest_by_depth(rounded)
+    finally:
+        set_theme(Theme())

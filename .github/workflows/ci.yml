@@ -9,6 +9,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +18,7 @@ jobs:
           version: latest
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: uv sync
       - run: uv run maturin develop
       - run: uv run pytest
@@ -37,3 +38,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - run: uv run maturin build --release --out dist
+      - run: uv venv /tmp/wheel-venv
+      - run: uv pip install --python /tmp/wheel-venv dist/*.whl
+      - run: /tmp/wheel-venv/bin/python -c "import sidol; print(sidol.__version__)"
+      - run: /tmp/wheel-venv/bin/sidol --help

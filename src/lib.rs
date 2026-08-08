@@ -148,6 +148,9 @@ fn compute_layout(
         rect.set_item("bg", &entry.bg)?;
         rect.set_item("variant", &entry.variant)?;
         rect.set_item("disabled", entry.disabled)?;
+        rect.set_item("radius", entry.radius)?;
+        rect.set_item("scroll_x", entry.scroll_x)?;
+        rect.set_item("scroll_y", entry.scroll_y)?;
         results.append(rect)?;
     }
     Ok(results.into())
@@ -183,6 +186,9 @@ fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
     let max_w = extract_opt_f32(props, "max_w")?;
     let max_h = extract_opt_f32(props, "max_h")?;
     let padding = extract_prop_f32(props, "padding", 0.0)?;
+    let radius = extract_prop_f32(props, "radius", 0.0)?;
+    let scroll_x = extract_prop_f32(props, "scroll_x", 0.0)?;
+    let scroll_y = extract_prop_f32(props, "scroll_y", 0.0)?;
 
     let mut children = Vec::with_capacity(children_tuple.len());
     for child in children_tuple.iter() {
@@ -202,6 +208,9 @@ fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
         bg,
         variant,
         disabled,
+        radius,
+        scroll_x,
+        scroll_y,
         children,
     })
 }
@@ -299,6 +308,8 @@ fn parse_rects(rects: &Bound<PyAny>) -> PyResult<Vec<render::LayoutRect>> {
         let fg = optional_rect_str(d, "fg")?;
         let bg = optional_rect_str(d, "bg")?;
         let disabled = optional_rect_bool(d, "disabled")?;
+        let scroll_x = optional_rect_f32(d, "scroll_x")?;
+        let scroll_y = optional_rect_f32(d, "scroll_y")?;
         result.push(render::LayoutRect {
             kind,
             x,
@@ -310,6 +321,8 @@ fn parse_rects(rects: &Bound<PyAny>) -> PyResult<Vec<render::LayoutRect>> {
             fg,
             bg,
             disabled,
+            scroll_x,
+            scroll_y,
         });
     }
     Ok(result)
@@ -343,6 +356,23 @@ fn required_rect_f32(dict: &Bound<PyDict>, key: &str) -> PyResult<f32> {
         )));
     }
     Ok(value)
+}
+
+fn optional_rect_f32(dict: &Bound<PyDict>, key: &str) -> PyResult<f32> {
+    match dict.get_item(key)? {
+        Some(value) => {
+            let parsed = value.extract::<f32>().map_err(|_| {
+                PyValueError::new_err(format!("layout rect '{key}' must be a number"))
+            })?;
+            if !parsed.is_finite() || parsed < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "layout rect '{key}' must be finite and non-negative"
+                )));
+            }
+            Ok(parsed)
+        }
+        None => Ok(0.0),
+    }
 }
 
 fn optional_rect_bool(dict: &Bound<PyDict>, key: &str) -> PyResult<bool> {

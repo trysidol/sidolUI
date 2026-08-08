@@ -65,15 +65,18 @@ Working:
 - Headless mode: `build_tree()` + `compute_layout()` for tests without a screen
 - TUI event loop with focus navigation
 - Mouse click dispatch for buttons
-- `sidol dev` native application launcher
+- `sidol dev` native app launcher with hot-reload (`--no-watch` to disable)
 - `Worker` background tasks
-- `List`, `Dropdown`, `ScrollView` layout container, and `Slider` widgets
+- `List`, `Dropdown`, and `Slider` widgets
+- `ScrollView` with keyboard scrolling and viewport clipping
+- Stable child identity via `Component.remember()` and `Component.keyed()`
+- Programmatic design system: `Theme` + `Style` + `resolve_style()` — no CSS, styling is Python
 
 Not yet:
 - `sidol build` bundling (the command is an explicit stub)
 - Async coroutine helpers
 - GPU surface (wgpu)
-- Full scrolling interaction and viewport offsets
+- Mouse-wheel gestures (arrow-key scrolling is available)
 - Automatic keyed list diffing beyond explicit `Component.keyed()` children
 
 HTML export and `DevServer` remain explicit development APIs, not the default

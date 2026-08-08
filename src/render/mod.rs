@@ -1,8 +1,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -24,6 +28,20 @@ pub struct LayoutRect {
     pub fg: String,
     pub bg: String,
     pub disabled: bool,
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+}
+
+/// A scroll viewport encountered while walking the flat rect list. Stores the
+/// cumulative scroll offset inherited from ancestor scroll containers.
+struct ScrollAncestor {
+    depth: usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    cum_off_x: f32,
+    cum_off_y: f32,
 }
 
 pub fn init() -> Result<(), String> {
@@ -32,11 +50,17 @@ pub fn init() -> Result<(), String> {
         return Ok(()); // already initialised, no-op
     }
     enable_raw_mode().map_err(|e| e.to_string())?;
-    let stdout = std::io::stdout();
+    let mut stdout = std::io::stdout();
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        let _ = disable_raw_mode();
+        return Err(error.to_string());
+    }
     let backend = CrosstermBackend::new(stdout);
     let terminal = match Terminal::new(backend) {
         Ok(terminal) => terminal,
         Err(error) => {
+            let mut stdout = std::io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen, Show);
             let _ = disable_raw_mode();
             return Err(error.to_string());
         }
@@ -50,6 +74,9 @@ pub fn cleanup() -> Result<(), String> {
     if guard.is_none() {
         return Ok(());
     }
+    let terminal = guard.as_mut().expect("terminal checked above");
+    terminal.show_cursor().map_err(|e| e.to_string())?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, Show).map_err(|e| e.to_string())?;
     disable_raw_mode().map_err(|e| e.to_string())?;
     guard.take();
     Ok(())
@@ -75,25 +102,53 @@ pub fn render_frame(rects: &[LayoutRect], focused_idx: i32) -> Result<String, St
             let area = frame.area();
             frame.render_widget(Clear, area);
             let buf = frame.buffer_mut();
-            let mut scroll_ancestors: Vec<(usize, f32, f32, f32, f32)> = Vec::new();
+            // Each entry tracks a scroll viewport and the cumulative scroll
+            // offset inherited from its ancestors.
+            let mut scroll_ancestors: Vec<ScrollAncestor> = Vec::new();
             for (i, rect) in rects.iter().enumerate() {
                 while scroll_ancestors
                     .last()
-                    .is_some_and(|(depth, ..)| *depth >= rect.depth)
+                    .is_some_and(|a| a.depth >= rect.depth)
                 {
                     scroll_ancestors.pop();
                 }
-                let clipped = scroll_ancestors.iter().any(|(_, x, y, w, h)| {
-                    rect.x < *x || rect.y < *y || rect.x >= *x + *w || rect.y >= *y + *h
+
+                let (off_x, off_y) = match scroll_ancestors.last() {
+                    Some(a) => (a.cum_off_x, a.cum_off_y),
+                    None => (0.0, 0.0),
+                };
+
+                let clipped = scroll_ancestors.iter().any(|a| {
+                    rect.x - a.cum_off_x >= a.x + a.w
+                        || rect.x - a.cum_off_x + rect.w <= a.x
+                        || rect.y - a.cum_off_y >= a.y + a.h
+                        || rect.y - a.cum_off_y + rect.h <= a.y
                 });
+
                 if rect.kind == "scroll_view" {
-                    scroll_ancestors.push((rect.depth, rect.x, rect.y, rect.w, rect.h));
+                    scroll_ancestors.push(ScrollAncestor {
+                        depth: rect.depth,
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        cum_off_x: off_x + rect.scroll_x,
+                        cum_off_y: off_y + rect.scroll_y,
+                    });
                 }
-                if clipped || rect.x >= area.right() as f32 || rect.y >= area.bottom() as f32 {
+
+                let draw_x = rect.x - off_x;
+                let draw_y = rect.y - off_y;
+                if clipped
+                    || draw_x < 0.0
+                    || draw_y < 0.0
+                    || draw_x >= area.right() as f32
+                    || draw_y >= area.bottom() as f32
+                {
                     continue;
                 }
-                let x = rect.x as u16;
-                let y = rect.y as u16;
+                let x = draw_x as u16;
+                let y = draw_y as u16;
                 let fg_color = hex_to_color(&rect.fg);
                 let bg_color = hex_to_color(&rect.bg);
                 let base_style = Style::default().fg(fg_color).bg(bg_color);
