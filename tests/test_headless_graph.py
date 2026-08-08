@@ -1319,10 +1319,91 @@ def test_scrollview_builds_tree() -> None:
     from sidol.widgets import Text
     from sidol.widgets.scroll import ScrollView
 
-    node = ScrollView(Text("content"), max_h=50)
+    node = ScrollView(Text("content"), max_h=50).rendered_view()
     assert node.kind == "scroll_view"
     assert node.props["max_h"] == 50.0
     assert len(node.children) == 1
+    assert node.props["scroll_x"] == 0
+    assert node.props["scroll_y"] == 0
+
+
+def test_scrollview_scroll_state_clamps_at_zero() -> None:
+    from sidol.widgets import Text
+    from sidol.widgets.scroll import ScrollView
+
+    sv = ScrollView(Text("a"), max_h=50)
+    assert sv.scroll_y == 0
+    sv.scroll_by(dy=-5)
+    assert sv.scroll_y == 0
+    sv.scroll_by(dy=5)
+    assert sv.scroll_y == 5
+    sv.scroll_to(y=10)
+    assert sv.scroll_y == 10
+    sv.scroll_to(y=-3)
+    assert sv.scroll_y == 0
+
+
+def test_scrollview_rects_carry_scroll_offset() -> None:
+    from sidol.widgets import Column, Text
+    from sidol.widgets.scroll import ScrollView
+
+    class Scroller(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scroller = ScrollView(
+                Column(Text("a"), Text("b"), Text("c")),
+                max_h=20,
+            )
+
+        def view(self):
+            return self.scroller
+
+    app = App(Scroller())
+    app.root.scroller.scroll_to(y=4)
+    rects = app.compute_layout(200, 150)
+    scroll_rect = next(r for r in rects if r["kind"] == "scroll_view")
+    assert scroll_rect["scroll_y"] == 4.0
+
+
+def test_scrollview_keyboard_scrolls_when_focused() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, Text
+    from sidol.widgets.scroll import ScrollView
+
+    class Scroller(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scroller = ScrollView(
+                Column(Text("a"), Text("b"), Text("c")),
+                max_h=20,
+            )
+
+        def view(self):
+            return self.scroller
+
+    app = App(Scroller())
+    tree = app.build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+    assert len(targets) == 1  # the scroll view is focusable
+
+    sv = app.root.scroller
+    assert sv.scroll_y == 0
+    _tui_step(
+        surface, "key@down", 0, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert sv.scroll_y == 1
+    _tui_step(
+        surface, "key@down", 0, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert sv.scroll_y == 2
+    _tui_step(
+        surface, "key@up", 0, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert sv.scroll_y == 1
 
 
 def test_scrollview_layout_produces_rects() -> None:

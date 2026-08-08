@@ -47,6 +47,8 @@ class App:
         try:
             component._active_keyed_children.clear()
             node = component.rendered_view()
+            if isinstance(node, Component):
+                return self._resolve_component_tree(node, active)
             if not isinstance(node, Node):
                 raise TypeError(
                     f"{type(component).__name__}.view() must return Node, "
