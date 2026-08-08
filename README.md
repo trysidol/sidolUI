@@ -65,7 +65,7 @@ Working:
 - Headless mode: `build_tree()` + `compute_layout()` for tests without a screen
 - TUI event loop with focus navigation
 - Mouse click dispatch for buttons
-- `sidol dev` native application launcher
+- `sidol dev` native app launcher with hot-reload (`--no-watch` to disable)
 - `Worker` background tasks
 - `List`, `Dropdown`, and `Slider` widgets
 - `ScrollView` with keyboard scrolling and viewport clipping
