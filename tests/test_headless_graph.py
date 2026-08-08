@@ -2123,3 +2123,73 @@ def test_cli_reloader_re_executes_module(tmp_path) -> None:
     app_file.write_text("app = 2\n")
     assert reload(str(app_file)) == 2
     assert module.app == 2
+
+
+def test_resolve_style_precedence() -> None:
+    from sidol.theme import Colors, Style, Theme, Typography, resolve_style
+
+    theme = Theme(
+        colors=Colors(primary="#111111", text="#222222"),
+        typography=Typography(size=20),
+    )
+    defaults = resolve_style(
+        theme,
+        default_fg=theme.colors.primary,
+        default_bg=theme.colors.surface,
+        default_radius=6,
+    )
+    assert defaults["color"] == "#111111"
+    assert defaults["bg"] == "#FFFFFF"
+    assert defaults["variant"] == "filled"
+    assert defaults["radius"] == 6
+    assert defaults["font_size"] == 20
+
+    overridden = resolve_style(
+        theme,
+        Style(color="#FF0000", radius=3, variant="ghost"),
+        default_fg=theme.colors.primary,
+        default_radius=6,
+    )
+    assert overridden["color"] == "#FF0000"
+    assert overridden["variant"] == "ghost"
+    assert overridden["radius"] == 3
+
+
+def test_button_radius_flows_through_layout() -> None:
+    from sidol._sidol_core import compute_layout
+
+    from sidol.theme import Style
+    from sidol.widgets import Button
+
+    def button_rect(node):
+        return next(r for r in compute_layout(node, 200, 100) if r["kind"] == "button")
+
+    assert button_rect(Button("Go"))["radius"] == 6.0
+    assert button_rect(Button("Go", style=Style(radius=12)))["radius"] == 12.0
+
+
+def test_html_uses_themed_radius_and_spacing() -> None:
+    from sidol._sidol_core import compute_layout
+
+    from sidol.surfaces.html import _nest_by_depth
+    from sidol.theme import Colors, Spacing, Style, Theme, Typography, set_theme
+    from sidol.widgets import Button
+
+    set_theme(
+        Theme(
+            colors=Colors(primary="#123456"),
+            spacing=Spacing(unit=8),
+            typography=Typography(size=18),
+        )
+    )
+    try:
+        rects = compute_layout(Button("Go"), 200, 100)
+        body = _nest_by_depth(rects)
+        assert "border-radius:6px" in body
+        assert "padding:8px" in body
+        assert "font-size:18px" in body
+
+        rounded = compute_layout(Button("Go", style=Style(radius=12)), 200, 100)
+        assert "border-radius:12px" in _nest_by_depth(rounded)
+    finally:
+        set_theme(Theme())

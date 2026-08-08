@@ -12,6 +12,7 @@ Usage::
 from __future__ import annotations
 
 from sidol.app import App
+from sidol.theme import get_theme
 
 __all__ = ["export_html", "export_tree_to_html"]
 
@@ -61,6 +62,10 @@ def _nest_by_depth(rects: list[dict]) -> str:
     if not rects:
         return ""
 
+    theme = get_theme()
+    font_size = theme.typography.size
+    spacing = theme.spacing.scale(1)
+
     lines: list[str] = []
     prev_depth = 0
     container_offsets: list[tuple[float, float]] = []
@@ -91,11 +96,13 @@ def _nest_by_depth(rects: list[dict]) -> str:
 
         if kind == "button":
             border_color = fg if fg.startswith("#") else "#0A84FF"
+            radius = int(r.get("radius", 6))
             style += (
                 f"border:2px solid {border_color};"
-                f"border-radius:6px;"
+                f"border-radius:{radius}px;"
+                f"padding:{spacing}px;"
                 f"display:flex;align-items:center;justify-content:center;"
-                f"font-family:monospace;font-size:14px;"
+                f"font-family:monospace;font-size:{font_size}px;"
                 f"cursor:pointer;"
             )
             lines.append(
@@ -105,7 +112,7 @@ def _nest_by_depth(rects: list[dict]) -> str:
             )
         elif kind == "text":
             style += (
-                "font-family:monospace;font-size:14px;"
+                f"font-family:monospace;font-size:{font_size}px;"
                 "overflow:hidden;white-space:nowrap;"
             )
             lines.append(

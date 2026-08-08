@@ -70,6 +70,7 @@ Working:
 - `List`, `Dropdown`, and `Slider` widgets
 - `ScrollView` with keyboard scrolling and viewport clipping
 - Stable child identity via `Component.remember()` and `Component.keyed()`
+- Programmatic design system: `Theme` + `Style` + `resolve_style()` — no CSS, styling is Python
 
 Not yet:
 - `sidol build` bundling (the command is an explicit stub)
