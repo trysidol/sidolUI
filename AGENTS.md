@@ -57,6 +57,13 @@ uv run ruff check sidol/ tests/
 cargo clippy
 ```
 
+## Benchmark
+
+```bash
+uv run maturin develop --release
+uv run python bench/bench_hotpath.py
+```
+
 ## Structure
 
 - `sidol/` — Python framework: `State` descriptor, `Component`, `App`,
@@ -69,4 +76,5 @@ cargo clippy
 
 - Pre-alpha 0.1.0. API can change between MINOR versions.
 - Status is deliberate: `build` bundling, async coroutine helpers, GPU,
-  interactive scrolling, and component reconciliation remain on the roadmap.
+  mouse-wheel gestures, and general keyed list reconciliation remain on the
+  roadmap. Focused `ScrollView` scrolling and explicit keyed children exist now.
