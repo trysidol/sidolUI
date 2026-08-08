@@ -67,13 +67,15 @@ Working:
 - Mouse click dispatch for buttons
 - `sidol dev` native application launcher
 - `Worker` background tasks
-- `List`, `Dropdown`, `ScrollView` layout container, and `Slider` widgets
+- `List`, `Dropdown`, and `Slider` widgets
+- `ScrollView` with keyboard scrolling and viewport clipping
+- Stable child identity via `Component.remember()` and `Component.keyed()`
 
 Not yet:
 - `sidol build` bundling (the command is an explicit stub)
 - Async coroutine helpers
 - GPU surface (wgpu)
-- Full scrolling interaction and viewport offsets
+- Mouse-wheel gestures (arrow-key scrolling is available)
 - Automatic keyed list diffing beyond explicit `Component.keyed()` children
 
 HTML export and `DevServer` remain explicit development APIs, not the default
