@@ -148,6 +148,7 @@ fn compute_layout(
         rect.set_item("bg", &entry.bg)?;
         rect.set_item("variant", &entry.variant)?;
         rect.set_item("disabled", entry.disabled)?;
+        rect.set_item("radius", entry.radius)?;
         rect.set_item("scroll_x", entry.scroll_x)?;
         rect.set_item("scroll_y", entry.scroll_y)?;
         results.append(rect)?;
@@ -185,6 +186,7 @@ fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
     let max_w = extract_opt_f32(props, "max_w")?;
     let max_h = extract_opt_f32(props, "max_h")?;
     let padding = extract_prop_f32(props, "padding", 0.0)?;
+    let radius = extract_prop_f32(props, "radius", 0.0)?;
     let scroll_x = extract_prop_f32(props, "scroll_x", 0.0)?;
     let scroll_y = extract_prop_f32(props, "scroll_y", 0.0)?;
 
@@ -206,6 +208,7 @@ fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
         bg,
         variant,
         disabled,
+        radius,
         scroll_x,
         scroll_y,
         children,

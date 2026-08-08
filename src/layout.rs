@@ -29,6 +29,7 @@ pub struct LayoutNode {
     pub bg: String,
     pub variant: String,
     pub disabled: bool,
+    pub radius: f32,
     pub scroll_x: f32,
     pub scroll_y: f32,
     pub children: Vec<LayoutNode>,
@@ -48,6 +49,7 @@ pub struct LayoutEntry {
     pub bg: String,
     pub variant: String,
     pub disabled: bool,
+    pub radius: f32,
     pub scroll_x: f32,
     pub scroll_y: f32,
 }
@@ -108,6 +110,7 @@ pub fn compute_layout(
             bg: entry.bg,
             variant: entry.variant,
             disabled: entry.disabled,
+            radius: entry.radius,
             scroll_x: entry.scroll_x,
             scroll_y: entry.scroll_y,
         });
@@ -126,6 +129,7 @@ fn validate_node(node: &LayoutNode) -> Result<(), String> {
     for (name, value) in [
         ("spacing", node.spacing),
         ("padding", node.padding),
+        ("radius", node.radius),
         ("scroll_x", node.scroll_x),
         ("scroll_y", node.scroll_y),
     ] {
@@ -175,6 +179,7 @@ struct InternalEntry {
     bg: String,
     variant: String,
     disabled: bool,
+    radius: f32,
     scroll_x: f32,
     scroll_y: f32,
 }
@@ -210,6 +215,7 @@ fn build_node(
         bg: node.bg.clone(),
         variant: node.variant.clone(),
         disabled: node.disabled,
+        radius: node.radius,
         scroll_x: node.scroll_x,
         scroll_y: node.scroll_y,
     });
