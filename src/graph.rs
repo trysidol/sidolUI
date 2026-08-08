@@ -76,18 +76,25 @@ impl Graph {
         id
     }
 
+    pub fn contains_signal(&self, id: SignalId) -> bool {
+        self.nodes.contains_key(&id)
+    }
+
     /// Declare that `dependent` should be dirtied when `source` changes.
     /// Edge is stored bidirectionally — forward for propagation, backward
     /// for teardown. Idempotent on repeat calls with the same pair.
     pub fn add_dependency(&mut self, source: SignalId, dependent: SignalId) {
+        if !self.nodes.contains_key(&source) || !self.nodes.contains_key(&dependent) {
+            return;
+        }
         self.nodes
-            .entry(source)
-            .or_default()
+            .get_mut(&source)
+            .unwrap()
             .dependents
             .insert(dependent);
         self.nodes
-            .entry(dependent)
-            .or_default()
+            .get_mut(&dependent)
+            .unwrap()
             .sources
             .insert(source);
     }
@@ -119,6 +126,24 @@ impl Graph {
         if let Some(node) = self.nodes.get_mut(&observer) {
             node.sources.clear();
         }
+    }
+
+    /// Remove a signal and all edges touching it.
+    pub fn remove_signal(&mut self, id: SignalId) {
+        let Some(node) = self.nodes.remove(&id) else {
+            return;
+        };
+        for source in node.sources {
+            if let Some(source_node) = self.nodes.get_mut(&source) {
+                source_node.dependents.remove(&id);
+            }
+        }
+        for dependent in node.dependents {
+            if let Some(dependent_node) = self.nodes.get_mut(&dependent) {
+                dependent_node.sources.remove(&id);
+            }
+        }
+        self.dirty.remove(&id);
     }
 
     /// Mark `id` dirty and propagate to all transitive dependents.
@@ -172,13 +197,12 @@ impl Graph {
         self.dirty.clear();
     }
 
-    /// Wipe the graph — all nodes, edges, dirty state. Test isolation only.
-    /// Calling this while live Component instances hold signal IDs leaves
-    /// them with dangling references to non-existent nodes.
+    /// Wipe the graph — all nodes, edges, and dirty state. Test isolation
+    /// only. IDs are deliberately not reused so delayed component cleanup
+    /// cannot remove a newer component's signal after a reset.
     pub fn reset(&mut self) {
         self.nodes.clear();
         self.dirty.clear();
-        self.next_id = 0;
     }
 }
 

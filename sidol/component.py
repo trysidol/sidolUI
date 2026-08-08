@@ -31,9 +31,9 @@ Stale conditional subscriptions
 from __future__ import annotations
 
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, TypeVar
 
 from sidol._sidol_core import Graph
 
@@ -50,6 +50,7 @@ _observer_stack: list[int] = []
 # Reverse map: computation signal ID -> Component instance.
 # WeakValueDictionary so orphaned components are collected.
 _computations: weakref.WeakValueDictionary[int, Component] = weakref.WeakValueDictionary()
+TComponent = TypeVar("TComponent", bound="Component")
 
 
 @contextmanager
@@ -138,15 +139,59 @@ class Component:
         # Populated by State.__set__ on first assignment.
         self._signal_ids: dict[str, int] = {}
         self._state_values: dict[str, Any] = {}
+        self.key: object | None = None
+        self._retained_children: dict[object, Component] = {}
+        self._keyed_children: dict[object, Component] = {}
+        self._active_keyed_children: set[object] = set()
         # View computation signal — dirty means view() output is stale.
         self._view_signal_id = _graph.create_signal()
         _computations[self._view_signal_id] = self
+
+    def __del__(self) -> None:
+        """Release this component's graph nodes when it is no longer used.
+
+        Components created during a render can otherwise leave orphaned
+        topology in the process-wide graph after Python collects them.
+        Destructors are best-effort because interpreter shutdown and the
+        test-only graph reset can invalidate these IDs first.
+        """
+        try:
+            _graph.remove_signal(self._view_signal_id)
+            for signal_id in self._signal_ids.values():
+                _graph.remove_signal(signal_id)
+        except Exception:
+            pass
 
     def view(self) -> Any:
         """Override to return a declarative Node tree. Pure function of self
         and its State fields — side effects (I/O, API calls) belong in event
         handlers, not here."""
         raise NotImplementedError
+
+    def remember(
+        self,
+        key: object,
+        factory: Callable[[], TComponent],
+    ) -> TComponent:
+        """Return one stable child component for ``key``.
+
+        Stateful children created directly inside ``view()`` are new objects
+        on every render. Use ``remember`` when a child owns reactive state so
+        its identity and graph signals survive parent rerenders.
+        """
+        child = self._retained_children.get(key)
+        if child is None:
+            child = factory()
+            if not isinstance(child, Component):
+                raise TypeError("remember() factory must return a Component")
+            self._retained_children[key] = child
+        return child  # type: ignore[return-value]
+
+    def keyed(self, key: object) -> Component:
+        """Assign an explicit identity used when reconciling a child."""
+        hash(key)
+        self.key = key
+        return self
 
     def rendered_view(self) -> Any:
         """Call view() inside a tracking context, with stale-edge pruning.

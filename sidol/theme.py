@@ -1,6 +1,6 @@
-"""Design tokens — colours, spacing, radii, and per-widget style overrides.
+"""Design tokens — colours and per-widget style overrides.
 
-Resolution order (not yet wired — no render surface exists):
+Resolution order for the current TUI and HTML surfaces:
   1. Per-widget Style override (if non-None).
   2. Active Theme default.
   3. Hardcoded engine fallback (last resort).
@@ -28,22 +28,8 @@ class Colors:
 
 
 @dataclass(frozen=True, slots=True)
-class Radius:
-    sm: int = 8
-    md: int = 14
-    lg: int = 20
-
-
-@dataclass(frozen=True, slots=True)
-class Spacing:
-    unit: int = 4
-
-
-@dataclass(frozen=True, slots=True)
 class Theme:
     colors: Colors = field(default_factory=Colors)
-    radius: Radius = field(default_factory=Radius)
-    spacing: Spacing = field(default_factory=Spacing)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +39,6 @@ class Style:
     variant: Literal["filled", "outline", "ghost"] | None = None
     color: str | None = None
     bg: str | None = None
-    corner_radius: int | None = None
-    haptic: bool = False
 
 
 _active_theme = Theme()

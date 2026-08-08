@@ -1,0 +1,1 @@
+"""Render surface implementations — TUI, headless, and (future) GPU."""

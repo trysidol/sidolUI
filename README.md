@@ -1,53 +1,35 @@
-<div align="center">
-
 # sidol
 
-**Python-native reactive UI. Rust engine. No browser, no C++ toolchain.**
+Reactive Python UI framework with a Rust engine (PyO3). No browser, no C++ toolchain.
 
-A reactive Python UI framework backed by a Rust core.
+## Requirements
 
-[![GitHub](https://img.shields.io/badge/github-mitayan0/sidol-8A2BE2)](https://github.com/mitayan0/sidol)
-[![Status](https://img.shields.io/badge/status-pre--alpha-yellow)]()
+- Python 3.12+
+- Rust 1.85+
+- [uv](https://docs.astral.sh/uv/)
 
-</div>
+## Install
 
----
+```bash
+git clone https://github.com/mitayan0/sidol.git
+cd sidol
 
-Python writes state. Rust runs the engine — reactive signal graph, layout, and rendering outside the GIL, with no browser runtime and no C++ toolchain.
+uv sync                  # .venv + dev dependencies
+uv run maturin develop   # compile Rust extension into .venv
+```
 
-- **Auto-tracked reactive state** — reading a `State` field inside `view()` registers the dependency; no manual wiring required
-- **`State` descriptor + observer stack** — fine-grained reactivity (like SolidJS), not coarse component diffing
-- **Rust core via PyO3** — dirty propagation never touches the GIL; zero serialization overhead between Python and Rust
-- **Phased render surfaces** — TUI (`ratatui`) first, GPU (`wgpu`) second, same reactive core throughout
+## Test
 
----
+```bash
+uv run pytest
+uv run ruff check sidol tests
+cargo test        # Rust tests, no Python needed
+```
 
-## How sidol compares
-
-**PyQt / PySide**
-
-- ✅ Similar: declarative widgets, event-driven, cross-platform.
-- 🔁 No C++ toolchain to install or distribute. The engine is pure Rust, compiled once into a single `.pyd`.
-- 🔁 The render loop runs outside the GIL — heavy Python logic won't freeze your UI.
-
-**Flet / NiceGUI**
-
-- ✅ Similar: Python-first API, reactive state, cross-platform.
-- 🔁 No embedded browser. No Chromium, no WebSocket bridge, no process-per-window overhead.
-- 🔁 Sidol renders to a terminal (Phase 1) or GPU surface (Phase 2), not a webview.
-
-**Slint**
-
-- ✅ Same architectural neighborhood: Rust core, GPU + software renderers, multi-language bindings.
-- 🔁 Python is sidol's primary — and only — interface. There is no DSL. Everything is Python.
-- 🔁 sidol starts with a TUI surface, not a GPU surface. Terminal-first, GPU later.
-
----
-
-## Current state
+## Quick start
 
 ```python
-from sidol import App, Component, State, Text, Column, Button
+from sidol import App, Component, State, Text, Column
 
 class Counter(Component):
     count = State()
@@ -59,65 +41,44 @@ class Counter(Component):
     def view(self):
         return Column(
             Text(f"Count: {self.count}"),
-            Button("+1", on_click=lambda: setattr(self, "count", self.count + 1)),
         )
 
 app = App(Counter())
-tree = app.build_tree()   # ✅ declarative Node tree
-# app.run()               # ❌ NotImplementedError — no render surface yet
+app.build_tree()               # Node tree
+app.compute_layout(400, 300)   # computed positions
+app.flush()                    # re-render after state changes
+# app.run()                    # TUI event loop (quits on 'q')
 ```
 
-## What works today
+## How it works
 
-- [x] Reactive signal graph (Rust) — create, depend, mark-dirty, propagate
-- [x] Auto-tracking — reading `State` during `view()` registers dependencies automatically
-- [x] Stale-edge pruning — conditional dependencies clean up on re-render
-- [x] PyO3 bridge — Python calls into Rust, zero GIL in the engine hot path
-- [x] Taffy layout engine — flexbox/grid, `Row`/`Column`/`Spacer` with spacing
-- [x] Headless surface — `print_layout()` dumps computed box tree as text
-- [x] Render loop — `flush()` processes dirty components with re-entrancy protection
-- [x] Test isolation — `reset_graph()` for clean per-test state
+Python holds signal values, Rust holds the dependency graph. Reading a `State` field inside `view()` registers a dependency automatically — no manual wiring, no diffing. Rust owns graph propagation and layout; Python currently remains involved at the FFI boundary and the graph calls are GIL-bound.
 
-## What's next
+Current surface is a keyboard-driven TUI (ratatui/crossterm). A GPU surface is planned, not started.
 
-| Phase | Surface | Status |
-|-------|---------|--------|
-| 5/6 | Layout + headless | ✅ |
-| 1 | TUI (`ratatui`) | ⬜ Next |
-| 2 | GPU (`wgpu` + `tiny-skia`) | ⬜ |
+## Status: pre-alpha
 
----
+Working:
+- Reactive signal graph: auto-tracking, dirty propagation, stale-edge pruning
+- Taffy flexbox layout (`Row`, `Column`, `Spacer`)
+- Widgets: `Text`, `Button`, `TextField`
+- Headless mode: `build_tree()` + `compute_layout()` for tests without a screen
+- TUI event loop with focus navigation
+- Mouse click dispatch for buttons
+- `sidol dev` native application launcher
+- `Worker` background tasks
+- `List`, `Dropdown`, `ScrollView` layout container, and `Slider` widgets
 
-## Installation
+Not yet:
+- `sidol build` bundling (the command is an explicit stub)
+- Async coroutine helpers
+- GPU surface (wgpu)
+- Full scrolling interaction and viewport offsets
+- Automatic keyed list diffing beyond explicit `Component.keyed()` children
 
-From source (the only option while pre-alpha):
+HTML export and `DevServer` remain explicit development APIs, not the default
+`sidol dev` surface.
 
-```bash
-git clone https://github.com/mitayan0/sidol.git
-cd sidol
+## License
 
-uv sync                  # create .venv and install dev dependencies
-uv run maturin develop   # compile Rust extension into .venv
-uv run pytest            # run Python tests
-cargo test               # run Rust unit tests (no Python required)
-```
-
-Requires: Rust 1.85+, [uv](https://docs.astral.sh/uv/), Python 3.12+.
-
----
-
-## Contributing
-
-Bug fixes with a regression test are always welcome.
-
-For new features, open an issue first — the build order is deliberate and jumping phases creates debt. For bugs, a focused PR with a failing test that your fix makes pass is the ideal contribution.
-
-**What gets merged:**
-- Regression tests for confirmed bugs
-- Small, focused PRs (large diffs will be asked to split)
-- Refactors with a clear readability win, not just churn
-
-**What won't be reviewed:**
-- Features that skip ahead of the current phase
-- Whitespace-only or formatting-only changes
-- PRs that rewrite docs without having contributed code first
+MIT

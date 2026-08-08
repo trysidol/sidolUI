@@ -478,6 +478,7 @@ dependencies = [
  "pyo3",
  "ratatui",
  "taffy",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
