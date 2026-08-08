@@ -1,6 +1,6 @@
 """CLI entry points — ``sidol dev`` and ``sidol build``.
 
-- ``sidol dev <app.py>`` — launch the application's native surface
+- ``sidol dev <app.py>`` — launch the native app surface with hot-reload
 - ``sidol build`` — structural stub (bundling ships after GPU surface)
 """
 
@@ -18,6 +18,29 @@ def _build(args: argparse.Namespace) -> None:
         "Desktop bundling/signing is scoped for after the GPU render "
         "surface (Phase 2) ships."
     )
+
+
+def _reloader(module):
+    """Return a hot-reload callable for the loaded app module."""
+
+    def reload(_path: str):
+        try:
+            spec = module.__spec__
+            if spec is None or spec.loader is None or spec.origin is None:
+                return None
+            importlib.invalidate_caches()
+            cached = importlib.util.cache_from_source(spec.origin)
+            try:
+                os.remove(cached)
+            except OSError:
+                pass
+            spec.loader.exec_module(module)
+            return getattr(module, "app", None)
+        except Exception as exc:
+            print(f"[sidol] reload failed: {exc}", file=sys.stderr, flush=True)
+            return None
+
+    return reload
 
 
 def _dev(args: argparse.Namespace) -> None:
@@ -41,7 +64,7 @@ def _dev(args: argparse.Namespace) -> None:
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # Required for importlib.reload() during hot-reload.
+    # Required for re-execution during hot-reload.
     sys.modules[module.__name__] = module
 
     # Look for an ``app`` variable in the module.
@@ -56,7 +79,16 @@ def _dev(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    app.run()
+    if args.watch:
+        from sidol.surfaces.tui import TuiSurface
+
+        TuiSurface(
+            app,
+            watch=[abs_path],
+            reloader=_reloader(module),
+        ).run()
+    else:
+        app.run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,9 +99,15 @@ def main(argv: list[str] | None = None) -> int:
     build_parser.add_argument("--target", choices=["windows", "macos", "linux"], required=True)
     build_parser.set_defaults(func=_build)
 
-    dev_parser = subparsers.add_parser("dev", help="Launch the native app surface")
+    dev_parser = subparsers.add_parser("dev", help="Launch the native app surface with hot-reload")
     dev_parser.add_argument("app_path", help="Path to the Python file containing your App")
-    dev_parser.set_defaults(func=_dev)
+    dev_parser.add_argument(
+        "--no-watch",
+        dest="watch",
+        action="store_false",
+        help="Disable hot-reload on file change",
+    )
+    dev_parser.set_defaults(watch=True, func=_dev)
 
     args = parser.parse_args(argv)
     args.func(args)

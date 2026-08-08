@@ -2,13 +2,16 @@
 
 Extracts the TUI-specific concerns from ``App.run()`` into a dedicated
 surface class. The ``TuiSurface`` owns the terminal lifecycle (init,
-render loop, cleanup), focus navigation, and callback dispatch.
+render loop, cleanup), focus navigation, callback dispatch, and optional
+hot-reload when watching app source files.
 
 ``App.run(surface=TuiSurface(app))`` delegates to this class.
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable
 
 from sidol._sidol_core import (
@@ -29,10 +32,24 @@ class TuiSurface:
 
         from sidol.surfaces.tui import TuiSurface
         TuiSurface(app).run()
+
+    When *watch* paths are provided, the loop polls them on every tick and
+    calls *reloader* when one changes. The reloader returns a replacement
+    ``App`` (or ``None`` to keep the current one), which is swapped in for
+    the next frame.
     """
 
-    def __init__(self, app: App) -> None:
+    def __init__(
+        self,
+        app: App,
+        *,
+        watch: str | list[str] | None = None,
+        reloader: Callable[[str], App | None] | None = None,
+    ) -> None:
         self._app = app
+        self._watch_paths = [watch] if isinstance(watch, str) else (watch or [])
+        self._reloader = reloader
+        self._last_mtimes: dict[str, float] = {}
 
     def run(self) -> None:
         """Enter the TUI event loop. Blocks until the user quits."""
@@ -67,8 +84,46 @@ class TuiSurface:
                 )
                 if quit:
                     break
+                if self._watch_paths:
+                    new_app = self._maybe_reload()
+                    if new_app is not None and new_app is not self._app:
+                        self._app = new_app
+                        focused_idx = -1
         finally:
             tui_cleanup()
+
+    # ------------------------------------------------------------------
+    # Hot-reload
+    # ------------------------------------------------------------------
+
+    def _maybe_reload(self) -> App | None:
+        """Poll watched files; on a change, ask the reloader for a new App."""
+        for path in self._watch_paths:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            previous = self._last_mtimes.get(path)
+            if previous is None:
+                self._last_mtimes[path] = mtime
+                continue
+            if mtime == previous:
+                continue
+            self._last_mtimes[path] = mtime
+            return self._reload(path)
+        return None
+
+    def _reload(self, path: str) -> App | None:
+        if self._reloader is None:
+            return None
+        new_app = self._reloader(path)
+        if new_app is not None and new_app is not self._app:
+            print(
+                f"[sidol] reloaded after change to {os.path.basename(path)}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return new_app
 
     def _dispatch(
         self,

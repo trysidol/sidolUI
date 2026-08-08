@@ -2030,3 +2030,96 @@ def test_tui_cleanup_runs_when_rendering_raises(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="render failed"):
         TuiSurface(App(Root())).run()
     assert cleanup_calls == [1]
+
+
+def test_tui_hot_reload_swaps_app_on_file_change(monkeypatch, tmp_path) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    watched = tmp_path / "app.py"
+    watched.write_text("app = 1\n")
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("one")
+
+    new_root = Root()
+    reloader_calls: list[str] = []
+
+    def reloader(path: str):
+        reloader_calls.append(path)
+        return App(new_root)
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    events = iter(["tick", "quit"])
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+    )
+
+    surface = TuiSurface(App(Root()), watch=[str(watched)], reloader=reloader)
+    # Force a change to be detected on the first tick.
+    surface._last_mtimes[str(watched)] = 0
+    surface.run()
+
+    assert reloader_calls == [str(watched)]
+    assert surface._app.root is new_root
+
+
+def test_tui_hot_reload_keeps_app_when_reloader_returns_none(
+    monkeypatch, tmp_path
+) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    watched = tmp_path / "app.py"
+    watched.write_text("app = 1\n")
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("one")
+
+    reloader_calls: list[str] = []
+
+    def reloader(path: str):
+        reloader_calls.append(path)
+        return None
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    events = iter(["tick", "quit"])
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+    )
+
+    original = App(Root())
+    surface = TuiSurface(original, watch=[str(watched)], reloader=reloader)
+    surface._last_mtimes[str(watched)] = 0
+    surface.run()
+
+    assert reloader_calls == [str(watched)]
+    assert surface._app is original
+
+
+def test_cli_reloader_re_executes_module(tmp_path) -> None:
+    import importlib.util
+
+    from sidol.cli import _reloader
+
+    app_file = tmp_path / "app.py"
+    app_file.write_text("app = 1\n")
+    spec = importlib.util.spec_from_file_location("reload_mod", str(app_file))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    reload = _reloader(module)
+    assert module.app == 1
+
+    app_file.write_text("app = 2\n")
+    assert reload(str(app_file)) == 2
+    assert module.app == 2
