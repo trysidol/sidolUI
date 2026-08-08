@@ -2,22 +2,16 @@
 
 build_tree() resolves the declarative tree for testing without a surface.
 compute_layout() runs the taffy flexbox engine and returns positions.
-run() raises NotImplementedError until a render surface (TUI/GPU) is wired.
+    run() enters the TUI event loop (delegates to ``TuiSurface``).
 flush() is the minimal render loop — call it after state changes to
 re-render dirty components.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from dataclasses import replace
 
-from sidol._sidol_core import (
-    compute_layout as _rust_compute_layout,
-    tui_cleanup,
-    tui_init,
-    tui_render_frame,
-    tui_size,
-)
+from sidol._sidol_core import compute_layout as _rust_compute_layout
 from sidol.component import Component, _computations, _graph
 from sidol.node import Node
 
@@ -27,18 +21,104 @@ class App:
         self.root = root
 
     def build_tree(self) -> Node:
-        return self.root.rendered_view()
+        """Resolve the full declarative tree, recursively.
 
-    def compute_layout(self, viewport_w: float = 800, viewport_h: float = 600) -> list[dict]:
-        """Run taffy flexbox layout on the current tree and return rects.
+        Calls ``rendered_view()`` on the root Component, then walks the
+        resulting Node tree and replaces any ``Component`` child references
+        with their resolved ``Node`` subtrees. Child Components get their
+        own signal IDs and tracking contexts — they re-render independently
+        of their parent.
+        """
+        return self._resolve_component_tree(self.root, set())
+
+    def _resolve_component_tree(self, component: Component, active: set[int]) -> Node:
+        """Resolve a Component and all Component references in its subtree
+        into a flat Node tree.
+
+        Calls ``rendered_view()`` on the component, then walks every level
+        of the resulting Node tree, resolving Component children at any
+        depth. This handles nested cases like ``Column(Column(TextField))``
+        where an intermediate Node wraps a Component grandchild.
+        """
+        component_id = id(component)
+        if component_id in active:
+            raise RuntimeError(f"Cyclic component tree involving {type(component).__name__}")
+        active.add(component_id)
+        try:
+            component._active_keyed_children.clear()
+            node = component.rendered_view()
+            if not isinstance(node, Node):
+                raise TypeError(
+                    f"{type(component).__name__}.view() must return Node, "
+                    f"got {type(node).__name__}"
+                )
+            resolved = self._resolve_node_children(node, active, component)
+            component._keyed_children = {
+                key: child
+                for key, child in component._keyed_children.items()
+                if key in component._active_keyed_children
+            }
+            return resolved
+        finally:
+            active.remove(component_id)
+
+    def _resolve_node_children(
+        self,
+        node: Node,
+        active: set[int],
+        owner: Component,
+    ) -> Node:
+        """Walk a Node's children, resolving any Component references found
+        at any depth. Returns the same Node if unchanged."""
+        changed = False
+        resolved: list[Node] = []
+        for child in node.children:
+            if isinstance(child, Component):
+                if getattr(child, "key", None) is not None:
+                    key = child.key
+                    existing = owner._keyed_children.get(key)
+                    if existing is not None:
+                        if type(existing) is not type(child):
+                            raise TypeError(
+                                f"key {key!r} changed component type from "
+                                f"{type(existing).__name__} to {type(child).__name__}"
+                            )
+                        child = existing
+                    else:
+                        owner._keyed_children[key] = child
+                    owner._active_keyed_children.add(key)
+                resolved.append(self._resolve_component_tree(child, active))
+                changed = True
+            elif isinstance(child, Node):
+                resolved_child = self._resolve_node_children(child, active, owner)
+                resolved.append(resolved_child)
+                if resolved_child is not child:
+                    changed = True
+            else:
+                raise TypeError(
+                    f"Node child must be Node or Component, got {type(child).__name__}"
+                )
+        if not changed:
+            return node
+        return replace(node, children=tuple(resolved))
+
+    def compute_layout(
+        self,
+        viewport_w: float = 800,
+        viewport_h: float = 600,
+        tree: Node | None = None,
+    ) -> list[dict]:
+        """Run taffy flexbox layout and return rects.
 
         Returns a flat list of dicts in pre-order (parent before children):
             [{"kind": "row", "x": 0, "y": 0, "w": 800, "h": 600}, ...]
 
-        The first entry is always the root. Use tree-walk logic to map
-        positions back to components.
+        If *tree* is provided (already built via ``build_tree()``), it is
+        reused instead of rebuilding — avoids a redundant ``view()`` call
+        per frame when the caller already has the tree.
         """
-        tree = self.build_tree()
+        if tree is None:
+            tree = self.build_tree()
         return _rust_compute_layout(tree, viewport_w, viewport_h)
 
     def print_layout(self, viewport_w: float = 800, viewport_h: float = 600) -> None:
@@ -86,76 +166,26 @@ class App:
         if first_error is not None:
             raise first_error
 
-    def run(self) -> None:
-        tui_init()
-        try:
-            viewport_w, viewport_h = tui_size()
-            focused_idx: int = -1  # index into buttons-only list (0..n-1), -1 = none
-            while True:
-                self.flush()
-                tree = self.build_tree()
-                rects = _rust_compute_layout(tree, float(viewport_w), float(viewport_h))
-                callbacks = self._button_callbacks(tree)
-                # Convert button index → rect index for rendering highlight
-                rect_focused = self._button_rect_index(rects, focused_idx)
-                event = tui_render_frame(rects, rect_focused)
-                if event == "quit":
-                    break
-                elif event == "focus_next":
-                    focused_idx = self._next_button(focused_idx, len(callbacks))
-                elif event == "focus_prev":
-                    focused_idx = self._prev_button(focused_idx, len(callbacks))
-                elif event == "activate":
-                    if 0 <= focused_idx < len(callbacks):
-                        cb = callbacks[focused_idx]
-                        if cb is not None:
-                            cb()
-        finally:
-            tui_cleanup()
+    def export_html(self, path: str, viewport_w: float = 800, viewport_h: float = 600) -> None:
+        """Export the current component tree as a standalone HTML page.
 
-    @staticmethod
-    def _button_rect_index(rects: list[dict], button_idx: int) -> int:
-        """Return the index in *rects* for the *button_idx*-th button (0-based)."""
-        if button_idx < 0:
-            return -1
-        count = 0
-        for i, r in enumerate(rects):
-            if r["kind"] == "button":
-                if count == button_idx:
-                    return i
-                count += 1
-        return -1
+        Builds the tree, computes layout via taffy, and writes a
+        self-contained HTML file that renders the UI using absolute
+        positioning matching the computed layout rects.
 
-    @staticmethod
-    def _next_button(current: int, total: int) -> int:
-        """Cyclic next: advance the button index, wrapping to first."""
-        if total == 0:
-            return -1
-        if current < 0:
-            return 0
-        return (current + 1) % total
-
-    @staticmethod
-    def _prev_button(current: int, total: int) -> int:
-        """Cyclic previous: step back the button index, wrapping to last."""
-        if total == 0:
-            return -1
-        if current <= 0:
-            return total - 1
-        return current - 1
-
-    def _button_callbacks(self, root: Node) -> list[Callable[[], None] | None]:
-        """Collect button callbacks in pre-order (same order as rects).
-
-        Returns a list with one entry per button. Entries are None for
-        buttons without an ``on_click`` handler, so the list index
-        matches the button index in the rect list.
+        See ``sidol/surfaces/html.py`` for the full implementation.
         """
-        callbacks: list[Callable[[], None] | None] = []
-        def walk(node: Node) -> None:
-            if node.kind == "button":
-                callbacks.append(node.on_click)
-            for child in node.children:
-                walk(child)
-        walk(root)
-        return callbacks
+        from sidol.surfaces.html import export_html
+
+        export_html(self, path, viewport_w, viewport_h)
+
+    def run(self) -> None:
+        """Enter the TUI event loop. Blocks until the user quits.
+
+        Delegates to ``TuiSurface`` (see ``sidol/surfaces/tui.py``).
+        A future GPU surface would similarly provide its own ``run()``
+        and be plugged in here via an optional parameter.
+        """
+        from sidol.surfaces.tui import TuiSurface
+
+        TuiSurface(self).run()
