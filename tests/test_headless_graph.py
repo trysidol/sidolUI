@@ -1756,3 +1756,196 @@ def test_worker_join_requires_start() -> None:
 
     with pytest.raises(RuntimeError, match="started before join"):
         Worker(lambda: None).join()
+
+
+def _tui_step(surface, event, focused, *, callbacks, button_callbacks, targets, rects):
+    """Helper: run one pure TUI dispatch step."""
+    return surface._dispatch(
+        event,
+        focused,
+        callbacks=callbacks,
+        button_callbacks=button_callbacks,
+        targets=targets,
+        rects=rects,
+    )
+
+
+def test_tui_dispatch_focus_navigation_and_activation() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    called: list[str] = []
+    tree = Column(
+        Button("a", on_click=lambda: called.append("a")),
+        Button("b", on_click=lambda: called.append("b")),
+    )
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    callbacks = surface._focus_callbacks(tree)
+    button_callbacks = surface._button_callbacks(tree)
+    targets = surface._focus_targets(tree)
+    rects: list[dict] = []
+
+    focused = -1
+    focused, quit = _tui_step(
+        surface, "focus_next", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert (focused, quit) == (0, False)
+    _tui_step(
+        surface, "activate", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert called == ["a"]
+
+    focused, _ = _tui_step(
+        surface, "focus_next", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert focused == 1
+    _tui_step(
+        surface, "activate", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert called == ["a", "b"]
+
+    focused, _ = _tui_step(
+        surface, "focus_prev", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert focused == 0
+
+    _, quit = _tui_step(
+        surface, "quit", focused, callbacks=callbacks,
+        button_callbacks=button_callbacks, targets=targets, rects=rects,
+    )
+    assert quit is True
+
+
+def test_tui_dispatch_keyboard_typing_to_textfield() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, TextField
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.field = TextField(initial="")
+
+        def view(self) -> Node:
+            return Column(self.field)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+    assert len(targets) == 1
+    focused = 0
+
+    for char in "hi":
+        focused, _ = _tui_step(
+            surface, f"key@{char}", focused, callbacks=[],
+            button_callbacks=[], targets=targets, rects=[],
+        )
+    assert form.field.value == "hi"
+
+    focused, _ = _tui_step(
+        surface, "key@backspace", focused, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert form.field.value == "h"
+
+    focused, _ = _tui_step(
+        surface, "key@home", focused, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    focused, _ = _tui_step(
+        surface, "key@a", focused, callbacks=[],
+        button_callbacks=[], targets=targets, rects=[],
+    )
+    assert form.field.value == "ah"
+
+
+def test_tui_mouse_click_dispatches_button() -> None:
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    called: list[str] = []
+    tree = Column(
+        Button("one", on_click=lambda: called.append("one")),
+        Button("two", on_click=lambda: called.append("two")),
+    )
+    app = App(None)  # type: ignore[arg-type]
+    rects = app.compute_layout(200, 100, tree=tree)
+    button_rects = [r for r in rects if r["kind"] == "button"]
+    assert len(button_rects) >= 2
+
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    button_callbacks = surface._button_callbacks(tree)
+
+    second = button_rects[1]
+    _tui_step(
+        surface,
+        f"click@{second['x'] + second['w'] / 2:.0f}@{second['y'] + second['h'] / 2:.0f}",
+        -1,
+        callbacks=[],
+        button_callbacks=button_callbacks,
+        targets=[],
+        rects=rects,
+    )
+    assert called == ["two"]
+
+    called.clear()
+    _tui_step(
+        surface, "click@999@999", -1, callbacks=[],
+        button_callbacks=button_callbacks, targets=[], rects=rects,
+    )
+    assert called == []
+
+
+def test_tui_run_loop_quits_and_cleans_up(monkeypatch) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Column(Button("x", on_click=lambda: None))
+
+    init_calls: list[int] = []
+    cleanup_calls: list[int] = []
+    events = iter(["quit"])
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: init_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+    )
+
+    TuiSurface(App(Root())).run()
+    assert init_calls == [1]
+    assert cleanup_calls == [1]
+
+
+def test_tui_cleanup_runs_when_rendering_raises(monkeypatch) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("hi")
+
+    cleanup_calls: list[int] = []
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+
+    def boom(rects, idx) -> str:
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(tui_module, "tui_render_frame", boom)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        TuiSurface(App(Root())).run()
+    assert cleanup_calls == [1]
