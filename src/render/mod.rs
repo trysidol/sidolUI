@@ -1,8 +1,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -32,11 +36,17 @@ pub fn init() -> Result<(), String> {
         return Ok(()); // already initialised, no-op
     }
     enable_raw_mode().map_err(|e| e.to_string())?;
-    let stdout = std::io::stdout();
+    let mut stdout = std::io::stdout();
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        let _ = disable_raw_mode();
+        return Err(error.to_string());
+    }
     let backend = CrosstermBackend::new(stdout);
     let terminal = match Terminal::new(backend) {
         Ok(terminal) => terminal,
         Err(error) => {
+            let mut stdout = std::io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen, Show);
             let _ = disable_raw_mode();
             return Err(error.to_string());
         }
@@ -50,6 +60,9 @@ pub fn cleanup() -> Result<(), String> {
     if guard.is_none() {
         return Ok(());
     }
+    let terminal = guard.as_mut().expect("terminal checked above");
+    terminal.show_cursor().map_err(|e| e.to_string())?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, Show).map_err(|e| e.to_string())?;
     disable_raw_mode().map_err(|e| e.to_string())?;
     guard.take();
     Ok(())
