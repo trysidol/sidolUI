@@ -127,6 +127,88 @@ struct ScrollAncestor {
     cum_off_y: f32,
 }
 
+/// Per-rect screen position after scroll offsetting, plus a clip flag.
+/// Produced once per frame by `screen_geometry` and shared by painting
+/// (`render_frame`) and click dispatch (`hit_test`) so the two can never
+/// drift apart.
+struct ScreenRect {
+    draw_x: f32,
+    draw_y: f32,
+    clipped: bool,
+}
+
+/// Compute per-rect draw coordinates and a scroll-clipped flag, mirroring
+/// the scroll-viewport culling walk. A rect is clipped when any ancestor
+/// scroll view's viewport no longer contains it at the scrolled position.
+fn screen_geometry(rects: &[LayoutEntry]) -> Vec<ScreenRect> {
+    let mut scroll_ancestors: Vec<ScrollAncestor> = Vec::new();
+    let mut geometry = Vec::with_capacity(rects.len());
+    for rect in rects {
+        while scroll_ancestors
+            .last()
+            .is_some_and(|a| a.depth >= rect.depth)
+        {
+            scroll_ancestors.pop();
+        }
+        let (off_x, off_y) = match scroll_ancestors.last() {
+            Some(a) => (a.cum_off_x, a.cum_off_y),
+            None => (0.0, 0.0),
+        };
+        let clipped = scroll_ancestors.iter().any(|a| {
+            rect.x - a.cum_off_x >= a.x + a.w
+                || rect.x - a.cum_off_x + rect.w <= a.x
+                || rect.y - a.cum_off_y >= a.y + a.h
+                || rect.y - a.cum_off_y + rect.h <= a.y
+        });
+        if rect.kind == "scroll_view" {
+            scroll_ancestors.push(ScrollAncestor {
+                depth: rect.depth,
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                cum_off_x: off_x + rect.scroll_x,
+                cum_off_y: off_y + rect.scroll_y,
+            });
+        }
+        geometry.push(ScreenRect {
+            draw_x: rect.x - off_x,
+            draw_y: rect.y - off_y,
+            clipped,
+        });
+    }
+    geometry
+}
+
+/// Hit-test a click at cell (x, y) against the topmost enabled button.
+///
+/// Returns the 0-based button index (pre-order among non-disabled buttons),
+/// matching `TuiSurface._button_callbacks` ordering, or `None` when the
+/// click lands on no button. Reverse walk so the last-drawn (topmost) rect
+/// containing the point wins; a disabled button or non-button rect stops
+/// the search exactly like the Python surface's old `break`.
+pub fn hit_test(rects: &[LayoutEntry], x: f32, y: f32) -> Option<usize> {
+    let geometry = screen_geometry(rects);
+    for (i, rect) in rects.iter().enumerate().rev() {
+        let g = &geometry[i];
+        if g.clipped {
+            continue;
+        }
+        if g.draw_x <= x && x < g.draw_x + rect.w && g.draw_y <= y && y < g.draw_y + rect.h {
+            if rect.kind == "button" && !rect.disabled {
+                return Some(
+                    rects[..i]
+                        .iter()
+                        .filter(|r| r.kind == "button" && !r.disabled)
+                        .count(),
+                );
+            }
+            return None;
+        }
+    }
+    None
+}
+
 pub fn init() -> Result<(), String> {
     let mut guard = TERMINAL.lock().map_err(|e| e.to_string())?;
     if guard.is_some() {
@@ -192,53 +274,19 @@ pub fn render_frame(rects: &[LayoutEntry], focused_idx: i32) -> Result<EventData
                 // Colour strings repeat across rects (theme tokens); parse
                 // each distinct value once per frame instead of per rect.
                 let mut color_cache: HashMap<&str, Color> = HashMap::new();
-                // Each entry tracks a scroll viewport and the cumulative
-                // scroll offset inherited from its ancestors.
-                let mut scroll_ancestors: Vec<ScrollAncestor> = Vec::new();
+                let geometry = screen_geometry(rects);
                 for (i, rect) in rects.iter().enumerate() {
-                    while scroll_ancestors
-                        .last()
-                        .is_some_and(|a| a.depth >= rect.depth)
-                    {
-                        scroll_ancestors.pop();
-                    }
-
-                    let (off_x, off_y) = match scroll_ancestors.last() {
-                        Some(a) => (a.cum_off_x, a.cum_off_y),
-                        None => (0.0, 0.0),
-                    };
-
-                    let clipped = scroll_ancestors.iter().any(|a| {
-                        rect.x - a.cum_off_x >= a.x + a.w
-                            || rect.x - a.cum_off_x + rect.w <= a.x
-                            || rect.y - a.cum_off_y >= a.y + a.h
-                            || rect.y - a.cum_off_y + rect.h <= a.y
-                    });
-
-                    if rect.kind == "scroll_view" {
-                        scroll_ancestors.push(ScrollAncestor {
-                            depth: rect.depth,
-                            x: rect.x,
-                            y: rect.y,
-                            w: rect.w,
-                            h: rect.h,
-                            cum_off_x: off_x + rect.scroll_x,
-                            cum_off_y: off_y + rect.scroll_y,
-                        });
-                    }
-
-                    let draw_x = rect.x - off_x;
-                    let draw_y = rect.y - off_y;
-                    if clipped
-                        || draw_x < 0.0
-                        || draw_y < 0.0
-                        || draw_x >= area.right() as f32
-                        || draw_y >= area.bottom() as f32
+                    let g = &geometry[i];
+                    if g.clipped
+                        || g.draw_x < 0.0
+                        || g.draw_y < 0.0
+                        || g.draw_x >= area.right() as f32
+                        || g.draw_y >= area.bottom() as f32
                     {
                         continue;
                     }
-                    let x = draw_x as u16;
-                    let y = draw_y as u16;
+                    let x = g.draw_x as u16;
+                    let y = g.draw_y as u16;
                     let fg_color = *color_cache
                         .entry(rect.fg.as_str())
                         .or_insert_with(|| hex_to_color(&rect.fg));
@@ -443,5 +491,67 @@ mod tests {
     fn focus_events_are_ignored() {
         assert_eq!(translate_event(&Event::FocusGained), None);
         assert_eq!(translate_event(&Event::FocusLost), None);
+    }
+
+    fn rect(kind: &str, x: f32, y: f32, w: f32, h: f32, depth: usize) -> LayoutEntry {
+        LayoutEntry {
+            kind: kind.to_string(),
+            x,
+            y,
+            w,
+            h,
+            depth,
+            text: String::new(),
+            fg: String::new(),
+            bg: String::new(),
+            variant: String::new(),
+            disabled: false,
+            radius: 0.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+        }
+    }
+
+    #[test]
+    fn hit_test_returns_topmost_button_index() {
+        let rects = vec![
+            rect("row", 0.0, 0.0, 20.0, 3.0, 0),
+            rect("button", 0.0, 0.0, 8.0, 3.0, 1),
+            rect("button", 9.0, 0.0, 8.0, 3.0, 1),
+        ];
+        assert_eq!(hit_test(&rects, 4.0, 1.0), Some(0));
+        assert_eq!(hit_test(&rects, 13.0, 1.0), Some(1));
+        assert_eq!(hit_test(&rects, 20.0, 1.0), None);
+    }
+
+    #[test]
+    fn hit_test_stops_at_non_button_rect() {
+        // A text rect drawn last (topmost) blocks the button beneath it.
+        let rects = vec![
+            rect("row", 0.0, 0.0, 20.0, 3.0, 0),
+            rect("button", 0.0, 0.0, 8.0, 3.0, 1),
+            rect("text", 0.0, 0.0, 8.0, 3.0, 1),
+        ];
+        assert_eq!(hit_test(&rects, 4.0, 1.0), None);
+    }
+
+    #[test]
+    fn hit_test_ignores_disabled_button() {
+        let mut button = rect("button", 0.0, 0.0, 8.0, 3.0, 1);
+        button.disabled = true;
+        let rects = vec![rect("row", 0.0, 0.0, 20.0, 3.0, 0), button];
+        assert_eq!(hit_test(&rects, 4.0, 1.0), None);
+    }
+
+    #[test]
+    fn hit_test_accounts_for_scroll_offset() {
+        // scroll_view scrolled down by 3: a button laid out at y=3 draws at
+        // y=0 and is hit there, but misses at its laid-out coordinates.
+        let mut sv = rect("scroll_view", 0.0, 0.0, 10.0, 3.0, 0);
+        sv.scroll_y = 3.0;
+        let button = rect("button", 0.0, 3.0, 8.0, 3.0, 1);
+        let rects = vec![sv, button];
+        assert_eq!(hit_test(&rects, 4.0, 1.0), Some(0));
+        assert_eq!(hit_test(&rects, 4.0, 5.0), None);
     }
 }

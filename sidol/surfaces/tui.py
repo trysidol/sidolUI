@@ -87,10 +87,22 @@ class TuiSurface:
                     # matching flush()'s defer-to-next-tick semantics rather
                     # than being swallowed by a blanket clear after the render.
                     _graph.clear_dirty()
-                    tree = self._app.build_tree()
-                    snapshot = compute_layout_snapshot(
-                        tree, float(viewport_w), float(viewport_h)
-                    )
+                    try:
+                        tree = self._app.build_tree()
+                        snapshot = compute_layout_snapshot(
+                            tree, float(viewport_w), float(viewport_h)
+                        )
+                    except Exception as exc:
+                        # A broken view() must not kill the loop — report and
+                        # keep the last good frame so the developer can fix the
+                        # code and hot-reload.
+                        print(
+                            f"[sidol] render failed: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        need_render = False
+                        continue
                     targets = self._focus_targets(tree)
                     button_callbacks = self._button_callbacks(tree)
                     focus_rects = self._focus_rect_indices(tree)
@@ -268,81 +280,16 @@ class TuiSurface:
     ) -> None:
         """Dispatch a mouse click to the topmost button under the cursor.
 
-        Rects are materialised from the layout snapshot and translated
-        into screen coordinates with the same scroll-offset logic the
-        renderer uses — a scrolled ScrollView's children are hit-tested
-        where they are drawn, not where they were laid out.
+        Hit-testing runs in Rust on the layout snapshot, using the same
+        scroll-clipping the renderer uses — so clicks land where content
+        is drawn, not where it was laid out. Returns the button index into
+        ``button_callbacks`` (pre-order among enabled buttons).
         """
-        click_x = float(event["x"])
-        click_y = float(event["y"])
-        rects = snapshot.to_dicts()
-        geometry = self._screen_geometry(rects)
-
-        button_indices = {
-            index: callback_index
-            for callback_index, index in enumerate(
-                i
-                for i, rect in enumerate(rects)
-                if rect["kind"] == "button" and not rect.get("disabled", False)
-            )
-        }
-        # Walk rects in reverse so topmost (last-drawn) elements win.
-        for i in range(len(rects) - 1, -1, -1):
-            r = rects[i]
-            draw_x, draw_y, clipped = geometry[i]
-            if clipped:
-                continue
-            if draw_x <= click_x < draw_x + r["w"] and draw_y <= click_y < draw_y + r["h"]:
-                if r["kind"] == "button" and not r.get("disabled", False):
-                    callback_index = button_indices.get(i)
-                    if callback_index is not None and callback_index < len(
-                        button_callbacks
-                    ):
-                        cb = button_callbacks[callback_index]
-                        if cb is not None:
-                            cb()
-                    return
-                break
-
-    @staticmethod
-    def _screen_geometry(rects: list[dict]) -> list[tuple[float, float, bool]]:
-        """Translate layout rects to screen coordinates.
-
-        Returns ``(draw_x, draw_y, clipped)`` per rect, mirroring the
-        scroll-viewport logic in the Rust renderer (``render_frame``):
-        children of a scroll view are drawn at their layout position
-        minus the cumulative scroll offset of their ancestors, and
-        children outside a viewport are clipped. Keep in sync with
-        ``src/render/mod.rs``.
-        """
-        # Each stack entry: [depth, x, y, w, h, cumulative_offset_x, cumulative_offset_y]
-        stack: list[list[float]] = []
-        geometry: list[tuple[float, float, bool]] = []
-        for r in rects:
-            while stack and stack[-1][0] >= r["depth"]:
-                stack.pop()
-            off_x, off_y = (stack[-1][5], stack[-1][6]) if stack else (0.0, 0.0)
-            clipped = any(
-                r["x"] - a[5] >= a[1] + a[3]
-                or r["x"] - a[5] + r["w"] <= a[1]
-                or r["y"] - a[6] >= a[2] + a[4]
-                or r["y"] - a[6] + r["h"] <= a[2]
-                for a in stack
-            )
-            if r["kind"] == "scroll_view":
-                stack.append(
-                    [
-                        r["depth"],
-                        r["x"],
-                        r["y"],
-                        r["w"],
-                        r["h"],
-                        off_x + r.get("scroll_x", 0.0),
-                        off_y + r.get("scroll_y", 0.0),
-                    ]
-                )
-            geometry.append((r["x"] - off_x, r["y"] - off_y, clipped))
-        return geometry
+        idx = snapshot.hit_test(float(event["x"]), float(event["y"]))
+        if idx is not None and idx < len(button_callbacks):
+            cb = button_callbacks[idx]
+            if cb is not None:
+                cb()
 
     def _button_callbacks(self, root: Node) -> list[Callable[[], None] | None]:
         """Collect button callbacks in pre-order (same order as rects).
@@ -363,13 +310,24 @@ class TuiSurface:
         walk(root)
         return callbacks
 
+    @staticmethod
+    def _is_focusable(node: Node) -> bool:
+        """A node is a focus target if it's an enabled button, explicitly
+        marked ``focusable``, or handles focus events. ``on_key`` alone is
+        NOT enough — a root container binding "q" as an app-level fallback
+        must not steal Tab focus (see the root fallback in ``_dispatch_key``).
+        """
+        if node.kind == "button" and not node.props.get("disabled", False):
+            return True
+        return node.focusable or node.on_focus is not None
+
     def _focus_targets(self, root: Node) -> list[Node]:
-        """Collect enabled buttons and nodes with keyboard/focus handlers."""
+        """Collect focusable nodes (enabled buttons, focusable widgets, and
+        nodes with ``on_focus`` handlers)."""
         targets: list[Node] = []
 
         def walk(node: Node) -> None:
-            enabled_button = node.kind == "button" and not node.props.get("disabled", False)
-            if enabled_button or node.on_key is not None or node.on_focus is not None:
+            if self._is_focusable(node):
                 targets.append(node)
             for child in node.children:
                 if isinstance(child, Node):
@@ -385,8 +343,7 @@ class TuiSurface:
 
         def walk(node: Node) -> None:
             nonlocal rect_index
-            enabled_button = node.kind == "button" and not node.props.get("disabled", False)
-            if enabled_button or node.on_key is not None or node.on_focus is not None:
+            if TuiSurface._is_focusable(node):
                 indices.append(rect_index)
             rect_index += 1
             for child in node.children:

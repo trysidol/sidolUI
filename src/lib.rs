@@ -145,6 +145,13 @@ impl PyLayoutSnapshot {
     fn __len__(&self) -> usize {
         self.entries.len()
     }
+
+    /// Hit-test a click at cell (x, y) against the topmost enabled button.
+    /// Returns the 0-based button index (matching the surface's
+    /// `_button_callbacks` ordering) or `None`.
+    fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
+        render::hit_test(&self.entries, x, y)
+    }
 }
 
 fn entries_to_dicts(py: Python<'_>, entries: &[layout::LayoutEntry]) -> PyResult<Py<PyAny>> {

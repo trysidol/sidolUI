@@ -61,6 +61,7 @@ class Node:
     on_click: Callable[[], None] | None = None
     on_key: dict[str, Callable[..., Any]] | None = None
     on_focus: Callable[..., Any] | None = None
+    focusable: bool = False
     key: str | int | None = None
 
     def __post_init__(self) -> None:

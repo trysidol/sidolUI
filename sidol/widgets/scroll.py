@@ -84,4 +84,5 @@ class ScrollView(Component):
             props=props,
             children=self._children,
             on_key=self._key_handlers(),
+            focusable=True,
         )

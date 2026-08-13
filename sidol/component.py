@@ -88,6 +88,11 @@ class State:
       and slots on the same class.
 
     Same pattern as Django model fields, dataclasses.field(), SQLAlchemy columns.
+
+    Mutable values (lists, dicts) must be *replaced*, not mutated in place:
+    ``self.items.append(x)`` never invokes ``__set__``, and re-assigning an
+    equal value (``self.items = list(self.items)``) is a deliberate no-op.
+    Assign a new, non-equal object to trigger a re-render.
     """
 
     def __set_name__(self, owner: type, name: str) -> None:

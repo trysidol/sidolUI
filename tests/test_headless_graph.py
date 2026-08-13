@@ -2043,6 +2043,37 @@ def test_tui_cleanup_runs_when_rendering_raises(monkeypatch) -> None:
     assert cleanup_calls == [1]
 
 
+def test_tui_loop_survives_view_error(monkeypatch, capsys) -> None:
+    """A broken view() must not kill the loop — it logs, keeps the last good
+    frame, and continues until quit (so a developer can hot-reload a fix)."""
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+
+    class Boom(Component):
+        def view(self) -> Node:
+            raise RuntimeError("boom")
+
+    init_calls: list[int] = []
+    cleanup_calls: list[int] = []
+    events = iter([_key_event("c", ctrl=True)])
+
+    app = App(Boom())
+    monkeypatch.setattr(tui_module, "tui_init", lambda: init_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    monkeypatch.setattr(tui_module, "tui_wait_event", lambda: next(events))
+
+    def broken_build_tree() -> Node:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app, "build_tree", broken_build_tree)
+
+    TuiSurface(app).run()
+    assert init_calls == [1]
+    assert cleanup_calls == [1]
+    assert "render failed" in capsys.readouterr().err
+
+
 def test_tui_hot_reload_swaps_app_on_file_change(monkeypatch, tmp_path) -> None:
     import sidol.surfaces.tui as tui_module
     from sidol.surfaces.tui import TuiSurface
@@ -2352,6 +2383,25 @@ def test_root_on_key_fallback_and_request_quit() -> None:
         button_callbacks=[], targets=surface._focus_targets(tree2), root=tree2,
     )
     assert app2._quit_requested is False
+
+
+def test_focusable_flag_controls_container_focus() -> None:
+    """``on_key`` alone is an app-level fallback, not focus; an explicit
+    ``focusable=True`` opts a container into Tab focus."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+
+    plain = Column(Button("x", on_click=lambda: None), on_key={"q": lambda e: None})
+    assert [n.kind for n in surface._focus_targets(plain)] == ["button"]
+
+    marked = Column(
+        Button("x", on_click=lambda: None),
+        on_key={"q": lambda e: None},
+        focusable=True,
+    )
+    assert [n.kind for n in surface._focus_targets(marked)] == ["column", "button"]
 
 
 def test_normalise_key_preserves_single_char_case() -> None:

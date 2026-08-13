@@ -29,6 +29,7 @@ def Row(
     on_click: Callable[[], None] | None = None,
     on_key: dict[str, Callable[..., object]] | None = None,
     on_focus: Callable[..., object] | None = None,
+    focusable: bool = False,
 ) -> Node:
     props: dict = {"spacing": spacing, "padding": padding}
     if min_w is not None:
@@ -46,6 +47,7 @@ def Row(
         on_click=on_click,
         on_key=on_key,
         on_focus=on_focus,
+        focusable=focusable,
     )
 
 
@@ -60,6 +62,7 @@ def Column(
     on_click: Callable[[], None] | None = None,
     on_key: dict[str, Callable[..., object]] | None = None,
     on_focus: Callable[..., object] | None = None,
+    focusable: bool = False,
 ) -> Node:
     props: dict = {"spacing": spacing, "padding": padding}
     if min_w is not None:
@@ -77,6 +80,7 @@ def Column(
         on_click=on_click,
         on_key=on_key,
         on_focus=on_focus,
+        focusable=focusable,
     )
 
 
