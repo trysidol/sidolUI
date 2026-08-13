@@ -30,6 +30,17 @@ class App:
         """
         self._quit_requested = True
 
+    def dispose(self) -> None:
+        """Deterministically tear down the whole component tree.
+
+        Calls ``dispose()`` on the root, which recursively disposes every
+        retained/keyed child and removes all their signal nodes from the
+        process-wide graph. Safe to call multiple times. Surfaces call this
+        on hot-reload (before swapping in the new app) and on exit so old
+        topologies never accumulate in the graph.
+        """
+        self.root.dispose()
+
     def build_tree(self) -> Node:
         """Resolve the full declarative tree, recursively.
 

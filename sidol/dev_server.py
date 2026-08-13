@@ -111,6 +111,7 @@ class DevServer:
         if self._server:
             self._server.shutdown()
         self._restore_flush()
+        self._app.dispose()
 
     @property
     def port(self) -> int | None:
@@ -196,6 +197,7 @@ class DevServer:
             if self._server:
                 self._server.server_close()
             self._restore_flush()
+            self._app.dispose()
 
     # ------------------------------------------------------------------
     # File watching + hot-reload
@@ -274,6 +276,7 @@ class DevServer:
 
             # Swap app references under the lock so handler threads are safe.
             with self._lock:
+                self._app.dispose()
                 self._app = new_app
                 self._orig_flush = new_app.flush
                 new_app.flush = self._flush_and_rebuild  # type: ignore[method-assign]

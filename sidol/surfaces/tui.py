@@ -129,6 +129,7 @@ class TuiSurface:
                 if self._watch_paths:
                     new_app = self._maybe_reload()
                     if new_app is not None and new_app is not self._app:
+                        self._app.dispose()
                         self._app = new_app
                         focused_idx = -1
                         swapped = True
@@ -138,6 +139,7 @@ class TuiSurface:
                     or bool(_graph.dirty_ids())
                 )
         finally:
+            self._app.dispose()
             tui_cleanup()
 
     # ------------------------------------------------------------------

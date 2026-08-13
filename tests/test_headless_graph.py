@@ -6,6 +6,8 @@ else builds on top of this reactive loop — if it's wrong, nothing works.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from sidol.app import App
@@ -2286,6 +2288,252 @@ def test_cli_reloader_re_executes_module(tmp_path) -> None:
     app_file.write_text("app = 2\n")
     assert reload(str(app_file)) == 2
     assert module.app == 2
+
+
+# --- Component/App lifecycle: dispose() --- #
+
+
+def test_dispose_removes_signals_and_unregisters_computation() -> None:
+    """dispose() must remove the view + state signals from the graph and
+    drop the component from _computations, deterministically."""
+    from sidol.component import _computations
+
+    counter = Counter()
+    counter.count = 5
+    view_id = counter._view_signal_id
+
+    assert _computations.get(view_id) is counter
+    counter.dispose()
+    assert counter._disposed is True
+    assert _computations.get(view_id) is None
+    # State writes after dispose must not create fresh graph signals.
+    assert counter._signal_ids == {}
+    counter.count = 6
+    assert counter._signal_ids == {}
+    assert _graph.dirty_ids() == []
+
+
+def test_dispose_is_idempotent() -> None:
+    counter = Counter()
+    counter.dispose()
+    counter.dispose()  # must not raise
+
+
+def test_dispose_recurses_into_remembered_children() -> None:
+    from sidol.widgets import Column, TextField
+
+    class Parent(Component):
+        def view(self) -> Node:
+            child = self.remember("field", lambda: TextField(initial="start"))
+            return Column(Text("parent"), child)
+
+    parent = Parent()
+    app = App(parent)
+    app.build_tree()
+    child = parent._retained_children["field"]
+    assert child._disposed is False
+
+    parent.dispose()
+    assert parent._disposed is True
+    assert child._disposed is True
+    assert parent._retained_children == {}
+
+
+def test_dispose_recurses_into_keyed_children() -> None:
+    from sidol.widgets import Column
+
+    class Item(Component):
+        value = State()
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+        def view(self) -> Node:
+            return Text(self.value)
+
+    class Parent(Component):
+        def view(self) -> Node:
+            return Column(Item("a").keyed("a"), Item("b").keyed("b"))
+
+    parent = Parent()
+    app = App(parent)
+    app.build_tree()
+    children = list(parent._keyed_children.values())
+    assert children and all(c._disposed is False for c in children)
+
+    parent.dispose()
+    assert all(c._disposed is True for c in children)
+    assert parent._keyed_children == {}
+
+
+def test_dispose_via_app_disposes_root_tree() -> None:
+    counter = Counter()
+    app = App(counter)
+    app.dispose()
+    assert counter._disposed is True
+    app.dispose()  # idempotent
+
+
+def test_disposed_state_read_still_returns_last_value() -> None:
+    """A worker callback landing on a disposed component must be able to read
+    the last value without registering new dependencies."""
+    counter = Counter()
+    counter.count = 3
+    counter.dispose()
+    assert counter.count == 3
+
+
+def test_dispose_after_reset_graph_is_safe() -> None:
+    """reset_graph() leaves live components with dangling signal IDs; dispose
+    must tolerate that (remove_signal is a no-op for missing IDs)."""
+    counter = Counter()
+    counter.count = 5
+    reset_graph()
+    counter.dispose()  # must not raise
+    assert counter._disposed is True
+
+
+def test_dispose_during_flush_skips_unregistered_computation() -> None:
+    """A component disposed between drain_dirty() and rendered_view() must be
+    skipped by flush() — _computations no longer maps its view signal."""
+    counter = Counter()
+    app = App(counter)
+    app.build_tree()
+    counter.count = 5
+    counter.dispose()
+    app.flush()  # must not raise, must not re-render the disposed component
+    assert counter._disposed is True
+    assert _graph.dirty_ids() == []
+
+
+def test_worker_callback_after_dispose_is_safe() -> None:
+    """A Worker completion callback that lands after the component was disposed
+    must store the value without touching the graph (no new signals, no dirty
+    marks) — so hot-reload never crashes on late callbacks."""
+    from sidol.concurrency import Worker
+
+    counter = Counter()
+    counter.count = 1
+
+    def on_done(result: int) -> None:
+        counter.count = result
+
+    worker = Worker(lambda: 42, on_done=on_done)
+    worker.start()
+    worker.join()
+    assert counter.count == 42
+    count_id = counter._signal_ids["count"]
+    assert count_id is not None
+
+    counter.dispose()
+    _graph.clear_dirty()
+    worker2 = Worker(lambda: 99, on_done=on_done)
+    worker2.start()
+    worker2.join()
+    assert counter.count == 99
+    assert _graph.dirty_ids() == []
+
+
+def test_tui_hot_reload_disposes_old_app(monkeypatch, tmp_path) -> None:
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Text
+
+    watched = tmp_path / "app.py"
+    watched.write_text("app = 1\n")
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Text("one")
+
+    old_root = Root()
+    old_app = App(old_root)
+    new_root = Root()
+    new_app = App(new_root)
+
+    def reloader(path: str):
+        return new_app
+
+    monkeypatch.setattr(tui_module, "tui_init", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    events = iter([{"type": "tick"}, _key_event("c", ctrl=True)])
+    monkeypatch.setattr(
+        tui_module, "tui_render_frame", lambda snapshot, idx: next(events)
+    )
+    monkeypatch.setattr(tui_module, "tui_wait_event", lambda: next(events))
+
+    surface = TuiSurface(old_app, watch=[str(watched)], reloader=reloader)
+    surface._last_mtimes[str(watched)] = 0
+    surface.run()
+
+    # The old app must be deterministically disposed on swap.
+    assert old_root._disposed is True
+    assert surface._app is new_app
+    # The running (new) app is disposed on surface teardown.
+    assert new_root._disposed is True
+
+
+def test_dev_server_hot_reload_disposes_old_app() -> None:
+    import importlib.util
+    import sys
+    import tempfile
+
+    from sidol.dev_server import DevServer
+
+    code = """from sidol import App
+from sidol.component import Component
+
+class TestComp(Component):
+    def view(self):
+        from sidol import Text
+        return Text("v1")
+
+app = App(TestComp())
+"""
+    tmpdir = tempfile.mkdtemp(prefix="sidol_dispose_")
+    try:
+        tmp_path = os.path.join(tmpdir, "hot_app.py")
+        with open(tmp_path, "w", newline="") as f:
+            f.write(code)
+            f.flush()
+            os.fsync(f.fileno())
+
+        abs_path = os.path.abspath(tmp_path)
+        orig_path = list(sys.path)
+        sys.path.insert(0, tmpdir)
+        try:
+            spec = importlib.util.spec_from_file_location("hot_app_d", abs_path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            old_app = module.app
+
+            server = DevServer(
+                old_app,
+                host="127.0.0.1",
+                port=19578,
+                verbosity=0,
+                watch=tmp_path,
+                module=module,
+            )
+            old_root = old_app.root
+            assert old_root._disposed is False
+
+            with open(tmp_path, "w", newline="") as f:
+                f.write(code.replace("v1", "v2"))
+                f.flush()
+                os.fsync(f.fileno())
+                server._hot_reload(tmp_path)
+
+            assert old_root._disposed is True
+            assert server._app is not old_app
+        finally:
+            sys.path = orig_path
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_resolve_style_precedence() -> None:
