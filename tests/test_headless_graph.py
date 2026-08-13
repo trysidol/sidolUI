@@ -1433,23 +1433,35 @@ def test_list_renders_items() -> None:
     from sidol.widgets import Text
     from sidol.widgets.list import List
 
-    lst = List(["a", "b", "c"], builder=lambda item, i: Text(f"{i}:{item}"))
-    app = App(lst)
-    tree = app.build_tree()
+    class Root(Component):
+        def view(self) -> Node:
+            return List(["a", "b", "c"], builder=lambda item, i: Text(f"{i}:{item}"))
+
+    tree = App(Root()).build_tree()
     assert _collect_text(tree) == ["0:a", "1:b", "2:c"]
 
 
 def test_list_reacts_to_data_change() -> None:
-    """Reassigning List.data dirties the component and re-renders."""
+    """Reassigning the parent's State re-renders the List."""
     from sidol.widgets import Text
     from sidol.widgets.list import List
 
-    lst = List(["x"], builder=lambda item, i: Text(item))
-    app = App(lst)
+    class Root(Component):
+        data = State()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.data = ["x"]
+
+        def view(self) -> Node:
+            return List(self.data, builder=lambda item, _i: Text(item))
+
+    root = Root()
+    app = App(root)
     tree = app.build_tree()
     assert _collect_text(tree) == ["x"]
 
-    lst.data = ["y", "z"]
+    root.data = ["y", "z"]
     app.flush()
     tree = app.build_tree()
     assert _collect_text(tree) == ["y", "z"]
@@ -1822,6 +1834,113 @@ def test_keyed_children_reconcile_when_reordered() -> None:
     assert parent._keyed_children["a"] is first["a"]
     assert parent._keyed_children["b"] is first["b"]
     assert parent._keyed_children["a"].value == "edited"
+
+
+def test_list_key_preserves_item_identity_on_reorder() -> None:
+    """List(key=...) auto-keys stateful items, so local state survives
+    reorders without manual .keyed() calls."""
+    from sidol.widgets import Text
+    from sidol.widgets.list import List
+
+    class Item(Component):
+        value = State()
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+        def view(self) -> Node:
+            return Text(self.value)
+
+    class TodoApp(Component):
+        todos = State()
+        reverse = State()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.todos = ["a", "b"]
+            self.reverse = False
+
+        def view(self) -> Node:
+            todos = list(self.todos)
+            if self.reverse:
+                todos.reverse()
+            return List(
+                todos,
+                key=lambda item: item,
+                builder=lambda item, _i: Item(item),
+            )
+
+    app = App(TodoApp())
+    app.build_tree()
+    root = app.root
+    first = dict(root._keyed_children)
+    first["a"].value = "edited"
+    root.reverse = True
+    app.flush()
+    app.build_tree()
+    assert root._keyed_children["a"] is first["a"]
+    assert root._keyed_children["b"] is first["b"]
+    assert root._keyed_children["a"].value == "edited"
+
+
+def test_list_key_preserves_identity_across_add_and_remove() -> None:
+    from sidol.widgets import Text
+    from sidol.widgets.list import List
+
+    class Item(Component):
+        value = State()
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+        def view(self) -> Node:
+            return Text(self.value)
+
+    class TodoApp(Component):
+        todos = State()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.todos = ["a", "b"]
+
+        def view(self) -> Node:
+            return List(
+                self.todos,
+                key=lambda item: item,
+                builder=lambda item, _i: Item(item),
+            )
+
+    app = App(TodoApp())
+    root = app.root
+    app.build_tree()
+    before = dict(root._keyed_children)
+    before["b"].value = "edited-b"
+
+    # Add "c", remove "a" — "b" must keep its instance and state.
+    root.todos = ["b", "c"]
+    app.flush()
+    app.build_tree()
+    assert set(root._keyed_children) == {"b", "c"}
+    assert root._keyed_children["b"] is before["b"]
+    assert root._keyed_children["b"].value == "edited-b"
+    assert "a" not in root._keyed_children
+
+
+def test_duplicate_child_keys_are_rejected() -> None:
+    from sidol.widgets import Column
+
+    class Item(Component):
+        def view(self) -> Node:
+            return Text("x")
+
+    class Dup(Component):
+        def view(self) -> Node:
+            return Column(Item().keyed("k"), Item().keyed("k"))
+
+    with pytest.raises(ValueError, match="duplicate child key 'k'"):
+        App(Dup()).build_tree()
 
 
 def test_graph_rejects_unknown_signal_ids() -> None:
