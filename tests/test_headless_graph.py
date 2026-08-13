@@ -2767,6 +2767,43 @@ def test_pump_workers_swallows_systemexit(capsys) -> None:
     assert "1" in capsys.readouterr().err
 
 
+def test_run_async_delivers_result_via_pump_workers() -> None:
+    """run_async runs a coroutine and delivers its result like a Worker."""
+    import asyncio
+    import time
+
+    from sidol.concurrency import pump_workers, run_async
+
+    async def compute() -> int:
+        await asyncio.sleep(0.01)
+        return 42
+
+    done: list[int] = []
+    worker = run_async(compute(), on_done=lambda r: done.append(r))
+    while not worker.poll():
+        time.sleep(0.01)
+    assert pump_workers() == 1
+    assert done == [42]
+
+
+def test_run_async_reports_coroutine_error(capsys) -> None:
+    """A failing coroutine is reported and cannot kill the loop."""
+    import asyncio
+    import time
+
+    from sidol.concurrency import pump_workers, run_async
+
+    async def boom() -> None:
+        await asyncio.sleep(0.01)
+        raise ValueError("async nope")
+
+    worker = run_async(boom())
+    while not worker.poll():
+        time.sleep(0.01)
+    assert pump_workers() == 1
+    assert "async nope" in capsys.readouterr().err
+
+
 def test_layout_snapshot_materialises_dicts() -> None:
     """The snapshot handle carries the same data as the dict API."""
     from sidol._sidol_core import compute_layout, compute_layout_snapshot

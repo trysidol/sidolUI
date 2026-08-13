@@ -75,8 +75,8 @@ uv run python bench/bench_hotpath.py
 ## Notes
 
 - Pre-alpha 0.1.0. API can change between MINOR versions.
-- Status is deliberate: `build` bundling, async coroutine helpers, GPU,
-  and mouse-wheel gestures remain on the roadmap. Native `sidol dev`
-  hot-reload, focused `ScrollView` scrolling, explicit and auto-keyed list
-  children (`List(key=...)`), and the programmatic design system
+- Status is deliberate: `build` bundling, GPU, and mouse-wheel gestures
+  remain on the roadmap. Native `sidol dev` hot-reload, focused `ScrollView`
+  scrolling, explicit and auto-keyed list children (`List(key=...)`),
+  `Worker`/`run_async` concurrency, and the programmatic design system
   (`Theme`/`Style`/`resolve_style`) exist now.

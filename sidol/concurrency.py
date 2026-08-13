@@ -2,15 +2,14 @@
 
 ``Worker`` runs a function in a daemon thread. Completion callbacks are
 invoked by ``join`` on the joining thread, which is the safe place to mutate
-reactive UI state.
-
-Async coroutine helpers are intentionally not included yet; use ``Worker``
-for background thread work.
+reactive UI state. ``run_async`` runs a coroutine the same way — the asyncio
+event loop runs in a worker thread and results flow through the same
+``pump_workers()``/``join()`` delivery path.
 
 Usage::
 
     import time
-    from sidol.concurrency import Worker
+    from sidol.concurrency import Worker, run_async
 
     class DataFetcher(Component):
         status = State()
@@ -20,8 +19,13 @@ Usage::
             self.status = "idle"
 
         def fetch(self):
-            worker = Worker(self._do_fetch, commit=self._on_done)
-            worker.start()
+            Worker(self._do_fetch, commit=self._on_done).start()
+
+        async def _fetch(self):
+            return await some_async_call()
+
+        def fetch_async(self):
+            run_async(self._fetch(), on_done=lambda r: setattr(self, "status", r))
 
         def _do_fetch(self):
             time.sleep(2)
@@ -36,9 +40,10 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -172,3 +177,31 @@ def pump_workers(flush: Callable[[], Any] | None = None) -> int:
             _active_workers.discard(worker)
         delivered += 1
     return delivered
+
+
+def run_async(
+    coro: Awaitable[Any],
+    *,
+    on_done: Callable[[Any], Any] | None = None,
+    commit: Callable[[], Any] | None = None,
+) -> Worker:
+    """Run a coroutine in a background asyncio event loop.
+
+    The coroutine runs to completion on a fresh event loop inside a worker
+    thread; its return value is passed to *on_done* (and *commit* runs) on
+    the joining thread via ``pump_workers()``/``join()`` — the same delivery
+    model as ``Worker``. Coroutine exceptions are stored on the worker and
+    reported to stderr, never killing the event loop.
+
+    Usage::
+
+        run_async(self._fetch(), on_done=lambda result: setattr(self, "data", result))
+
+    Pass a fresh coroutine object each call (coroutines are single-use).
+    """
+    def _runner() -> Any:
+        return asyncio.run(coro)
+
+    worker = Worker(_runner, on_done=on_done, commit=commit)
+    worker.start()
+    return worker
