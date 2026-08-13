@@ -2,18 +2,20 @@
 
 ``on_key`` and ``on_focus`` Node fields let widgets declare event
 handlers without subclassing Component. The TUI render surface
-dispatches events to the focused widget.
+dispatches events to the focused widget, then to the root node as an
+app-level fallback.
 
 Usage::
 
-    from sidol.events import on_key
-
     def view(self):
-        return Text("Press ESC to quit", on_key={"esc": self._handle_esc})
+        return Text("Press ESC to go back", on_key={"esc": self._go_back})
 
-``on_key`` accepts a dict mapping key names to callables. Supported
-keys: "esc", "enter", "tab", "up", "down", "left", "right", "backspace",
-"delete", "home", "end", plus any single-character string like "a", "1".
+``on_key`` maps canonical key names to callables. Special keys: "esc",
+"enter", "tab", "backtab", "up", "down", "left", "right", "backspace",
+"delete", "home", "end", "pageup", "pagedown". Printable characters are
+the character itself with case preserved ("a", "A", "@", "1"). The
+wildcard ``"*"`` handler receives any printable character without an
+explicit binding — text inputs use this instead of enumerating keys.
 """
 
 from __future__ import annotations
@@ -35,7 +37,13 @@ _KEY_ALIASES: dict[str, str] = {
 
 
 def normalise_key(name: str) -> str:
-    """Convert a key label (e.g. 'escape', 'arrow_up') to its canonical form."""
+    """Convert a key label (e.g. 'escape', 'arrow_up') to its canonical form.
+
+    Single printable characters keep their case — "A" and "a" are
+    different keys. Only multi-character names are lowercased/aliased.
+    """
+    if len(name) == 1:
+        return name
     return _KEY_ALIASES.get(name.lower(), name.lower())
 
 
@@ -44,7 +52,7 @@ class KeyEvent:
     """A keyboard event dispatched to the focused widget."""
 
     key: str
-    """Canonical key name (lowercase, normalised)."""
+    """Canonical key name (printable chars keep their case)."""
 
     ctrl: bool = False
     alt: bool = False

@@ -11,6 +11,8 @@ import importlib.util
 import os
 import sys
 
+from sidol._reload import re_execute_module
+
 
 def _build(args: argparse.Namespace) -> None:
     raise NotImplementedError(
@@ -25,17 +27,7 @@ def _reloader(module):
 
     def reload(_path: str):
         try:
-            spec = module.__spec__
-            if spec is None or spec.loader is None or spec.origin is None:
-                return None
-            importlib.invalidate_caches()
-            cached = importlib.util.cache_from_source(spec.origin)
-            try:
-                os.remove(cached)
-            except OSError:
-                pass
-            spec.loader.exec_module(module)
-            return getattr(module, "app", None)
+            return re_execute_module(module)
         except Exception as exc:
             print(f"[sidol] reload failed: {exc}", file=sys.stderr, flush=True)
             return None

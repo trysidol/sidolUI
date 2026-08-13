@@ -1,7 +1,8 @@
 """Slider — a range control with a visual bar indicator.
 
 ``Slider`` is a ``Component`` subclass with reactive state. It renders
-a filled bar showing the current position within the range.
+a filled bar showing the current position within the range. Focus it
+with Tab and adjust with Left/Right (Home/End jump to the bounds).
 
 Usage::
 
@@ -28,12 +29,17 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sidol.component import Component, State
+from sidol.events import FocusEvent
+from sidol.theme import get_theme
 from sidol.widgets import Row, Text
 
 
 class Slider(Component):
     value = State()
+    is_focused = State()
 
     def __init__(
         self,
@@ -49,6 +55,7 @@ class Slider(Component):
         self._step = step
         self._width = width
         self.value = value if value is not None else min_val
+        self.is_focused = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -92,6 +99,24 @@ class Slider(Component):
             self.value = max_val
 
     # ------------------------------------------------------------------
+    # Keyboard interaction
+    # ------------------------------------------------------------------
+
+    def _key_handlers(self) -> dict[str, Callable[..., object]]:
+        return {
+            "left": lambda event: self.decrement(),
+            "right": lambda event: self.increment(),
+            "home": lambda event: self._set(self._min),
+            "end": lambda event: self._set(self._max),
+        }
+
+    def _set(self, value: float) -> None:
+        self.value = value
+
+    def _handle_focus(self, event: FocusEvent) -> None:
+        self.is_focused = event.kind == "focus"
+
+    # ------------------------------------------------------------------
     # View
     # ------------------------------------------------------------------
 
@@ -100,4 +125,9 @@ class Slider(Component):
         filled = max(0, min(self._width, int(round(ratio * self._width))))
         empty = self._width - filled
         bar = "█" * filled + "░" * empty
-        return Row(Text(f"[{bar}]"))
+        fg = get_theme().colors.primary if self.is_focused else None
+        return Row(
+            Text(f"[{bar}]", fg=fg),
+            on_key=self._key_handlers(),
+            on_focus=self._handle_focus,
+        )

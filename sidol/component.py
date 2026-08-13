@@ -112,7 +112,16 @@ class State:
         if self._name not in signal_ids:
             signal_ids[self._name] = _graph.create_signal()
         else:
-            _graph.mark_dirty(signal_ids[self._name])
+            # Re-assigning an equal value is a no-op for the graph —
+            # otherwise idempotent writes (e.g. scroll_by clamped at 0)
+            # would re-dirty the component forever. If equality can't be
+            # decided (exotic __eq__), conservatively treat it as changed.
+            try:
+                unchanged = bool(instance._state_values[self._name] == value)
+            except Exception:
+                unchanged = False
+            if not unchanged:
+                _graph.mark_dirty(signal_ids[self._name])
         instance._state_values[self._name] = value
 
     _name: str

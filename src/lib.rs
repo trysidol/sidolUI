@@ -7,18 +7,25 @@
 //! # Mutex
 //!
 //! The GIL serialises Python calls, so in theory no Mutex is needed. But
-//! PyO3 allows Rust to release the GIL (`Python::allow_threads`), and a
+//! PyO3 allows Rust to release the GIL (`Python::detach`), and a
 //! future Phase-2 render loop might use that. An uncontended Mutex lock is
 //! ~5ns — far below the noise floor.
 //!
 //! A poisoned lock (panic while held) is caught and converted to a Python
 //! RuntimeError rather than letting the panic cross the FFI boundary, which
 //! is undefined behaviour.
+//!
+//! # Layout snapshots
+//!
+//! `compute_layout` returns plain dicts for the headless/test API.
+//! `compute_layout_snapshot` returns a `LayoutSnapshot` handle instead —
+//! the TUI surface passes it straight back to `tui_render_frame`, so the
+//! hot path never marshals per-rect dicts across the FFI twice.
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::*;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 mod graph;
 use graph::{Graph as CoreGraph, SignalId};
@@ -118,24 +125,31 @@ impl PyGraph {
     }
 }
 
-/// Compute flexbox layout for a Python Node tree.
-/// Returns a list of `{kind, x, y, w, h}` dicts in pre-order traversal.
-///
-/// Conversion from Python types to pure-Rust `LayoutNode` happens here;
-/// the actual taffy computation is in `layout::compute_layout` which has
-/// zero PyO3 dependency and is testable with `cargo test`.
-#[pyfunction]
-fn compute_layout(
-    py: Python<'_>,
-    root: &Bound<PyAny>,
-    viewport_w: f32,
-    viewport_h: f32,
-) -> PyResult<Py<PyAny>> {
-    let layout_root = py_node_to_layout(root)?;
-    let entries = layout::compute_layout(&layout_root, viewport_w, viewport_h)
-        .map_err(PyRuntimeError::new_err)?;
+/// A computed layout held in Rust. The TUI surface passes this back to
+/// `tui_render_frame` directly — no per-rect dict round-trip on the hot
+/// path. `to_dicts()` materialises the Python representation on demand
+/// (hit-testing, headless inspection, tests).
+#[pyclass(name = "LayoutSnapshot")]
+struct PyLayoutSnapshot {
+    entries: Arc<Vec<layout::LayoutEntry>>,
+}
+
+#[pymethods]
+impl PyLayoutSnapshot {
+    /// Materialise the snapshot as a list of `{kind, x, y, w, h, ...}`
+    /// dicts in pre-order traversal.
+    fn to_dicts(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        entries_to_dicts(py, &self.entries)
+    }
+
+    fn __len__(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn entries_to_dicts(py: Python<'_>, entries: &[layout::LayoutEntry]) -> PyResult<Py<PyAny>> {
     let results = PyList::empty(py);
-    for entry in &entries {
+    for entry in entries {
         let rect = PyDict::new(py);
         rect.set_item("kind", &entry.kind)?;
         rect.set_item("x", entry.x)?;
@@ -154,6 +168,48 @@ fn compute_layout(
         results.append(rect)?;
     }
     Ok(results.into())
+}
+
+/// Shared conversion: Python Node tree -> validated layout entries.
+fn build_layout_entries(
+    root: &Bound<PyAny>,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> PyResult<Vec<layout::LayoutEntry>> {
+    let layout_root = py_node_to_layout(root)?;
+    layout::compute_layout(&layout_root, viewport_w, viewport_h).map_err(PyRuntimeError::new_err)
+}
+
+/// Compute flexbox layout for a Python Node tree.
+/// Returns a list of `{kind, x, y, w, h}` dicts in pre-order traversal.
+///
+/// Conversion from Python types to pure-Rust `LayoutNode` happens here;
+/// the actual taffy computation is in `layout::compute_layout` which has
+/// zero PyO3 dependency and is testable with `cargo test`.
+#[pyfunction]
+fn compute_layout(
+    py: Python<'_>,
+    root: &Bound<PyAny>,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> PyResult<Py<PyAny>> {
+    let entries = build_layout_entries(root, viewport_w, viewport_h)?;
+    entries_to_dicts(py, &entries)
+}
+
+/// Compute layout and keep the result in Rust as a `LayoutSnapshot`.
+/// This is the render-loop entry point — the snapshot goes straight back
+/// to `tui_render_frame` without dict marshalling.
+#[pyfunction]
+fn compute_layout_snapshot(
+    root: &Bound<PyAny>,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> PyResult<PyLayoutSnapshot> {
+    let entries = build_layout_entries(root, viewport_w, viewport_h)?;
+    Ok(PyLayoutSnapshot {
+        entries: Arc::new(entries),
+    })
 }
 
 /// Recursively convert a Python Node tree into a pure-Rust LayoutNode.
@@ -270,6 +326,36 @@ fn extract_prop_bool(props: &Bound<PyDict>, key: &str, default: bool) -> PyResul
     }
 }
 
+/// Convert one engine event to the Python dict protocol:
+///   {"type": "tick"} / {"type": "resize"}
+///   {"type": "key", "key": str, "ctrl": b, "alt": b, "shift": b}
+///   {"type": "click", "x": int, "y": int}
+fn event_to_py(py: Python<'_>, event: &render::EventData) -> PyResult<Py<PyAny>> {
+    let d = PyDict::new(py);
+    match event {
+        render::EventData::Tick => d.set_item("type", "tick")?,
+        render::EventData::Resize => d.set_item("type", "resize")?,
+        render::EventData::Key {
+            key,
+            ctrl,
+            alt,
+            shift,
+        } => {
+            d.set_item("type", "key")?;
+            d.set_item("key", key)?;
+            d.set_item("ctrl", ctrl)?;
+            d.set_item("alt", alt)?;
+            d.set_item("shift", shift)?;
+        }
+        render::EventData::Click { x, y } => {
+            d.set_item("type", "click")?;
+            d.set_item("x", x)?;
+            d.set_item("y", y)?;
+        }
+    }
+    Ok(d.into())
+}
+
 #[pyfunction]
 fn tui_init() -> PyResult<()> {
     render::init().map_err(PyRuntimeError::new_err)
@@ -285,121 +371,43 @@ fn tui_size() -> PyResult<(u16, u16)> {
     render::get_size().map_err(PyRuntimeError::new_err)
 }
 
+/// Draw one frame from a layout snapshot, then block for the next event.
+/// The GIL is released for the whole call so worker threads keep running
+/// while the surface waits for input.
 #[pyfunction]
-fn tui_render_frame(py: Python<'_>, rects: &Bound<PyAny>, focused_idx: i32) -> PyResult<String> {
-    let layout_rects = parse_rects(rects)?;
-    py.detach(|| render::render_frame(&layout_rects, focused_idx))
-        .map_err(PyRuntimeError::new_err)
+fn tui_render_frame(
+    py: Python<'_>,
+    snapshot: PyRef<'_, PyLayoutSnapshot>,
+    focused_idx: i32,
+) -> PyResult<Py<PyAny>> {
+    let entries = Arc::clone(&snapshot.entries);
+    let event = py
+        .detach(move || render::render_frame(&entries, focused_idx))
+        .map_err(PyRuntimeError::new_err)?;
+    event_to_py(py, &event)
 }
 
-/// Parse a Python list of layout dicts into a Vec<render::LayoutRect>.
-fn parse_rects(rects: &Bound<PyAny>) -> PyResult<Vec<render::LayoutRect>> {
-    let list = rects.cast::<PyList>()?;
-    let mut result = Vec::with_capacity(list.len());
-    for item in list.iter() {
-        let d = item.cast::<PyDict>()?;
-        let kind = required_rect_str(d, "kind")?;
-        let x = required_rect_f32(d, "x")?;
-        let y = required_rect_f32(d, "y")?;
-        let w = required_rect_f32(d, "w")?;
-        let h = required_rect_f32(d, "h")?;
-        let depth = optional_rect_usize(d, "depth")?;
-        let text = optional_rect_str(d, "text")?;
-        let fg = optional_rect_str(d, "fg")?;
-        let bg = optional_rect_str(d, "bg")?;
-        let disabled = optional_rect_bool(d, "disabled")?;
-        let scroll_x = optional_rect_f32(d, "scroll_x")?;
-        let scroll_y = optional_rect_f32(d, "scroll_y")?;
-        result.push(render::LayoutRect {
-            kind,
-            x,
-            y,
-            w,
-            h,
-            depth,
-            text,
-            fg,
-            bg,
-            disabled,
-            scroll_x,
-            scroll_y,
-        });
-    }
-    Ok(result)
-}
-
-fn required_rect_str(dict: &Bound<PyDict>, key: &str) -> PyResult<String> {
-    dict.get_item(key)?
-        .ok_or_else(|| PyValueError::new_err(format!("layout rect is missing '{key}'")))?
-        .extract::<String>()
-        .map_err(|_| PyValueError::new_err(format!("layout rect '{key}' must be a string")))
-}
-
-fn optional_rect_str(dict: &Bound<PyDict>, key: &str) -> PyResult<String> {
-    match dict.get_item(key)? {
-        Some(value) => value
-            .extract::<String>()
-            .map_err(|_| PyValueError::new_err(format!("layout rect '{key}' must be a string"))),
-        None => Ok(String::new()),
-    }
-}
-
-fn required_rect_f32(dict: &Bound<PyDict>, key: &str) -> PyResult<f32> {
-    let value = dict
-        .get_item(key)?
-        .ok_or_else(|| PyValueError::new_err(format!("layout rect is missing '{key}'")))?
-        .extract::<f32>()
-        .map_err(|_| PyValueError::new_err(format!("layout rect '{key}' must be a number")))?;
-    if !value.is_finite() || value < 0.0 {
-        return Err(PyValueError::new_err(format!(
-            "layout rect '{key}' must be finite and non-negative"
-        )));
-    }
-    Ok(value)
-}
-
-fn optional_rect_f32(dict: &Bound<PyDict>, key: &str) -> PyResult<f32> {
-    match dict.get_item(key)? {
-        Some(value) => {
-            let parsed = value.extract::<f32>().map_err(|_| {
-                PyValueError::new_err(format!("layout rect '{key}' must be a number"))
-            })?;
-            if !parsed.is_finite() || parsed < 0.0 {
-                return Err(PyValueError::new_err(format!(
-                    "layout rect '{key}' must be finite and non-negative"
-                )));
-            }
-            Ok(parsed)
-        }
-        None => Ok(0.0),
-    }
-}
-
-fn optional_rect_bool(dict: &Bound<PyDict>, key: &str) -> PyResult<bool> {
-    match dict.get_item(key)? {
-        Some(value) => value
-            .extract::<bool>()
-            .map_err(|_| PyValueError::new_err(format!("layout rect '{key}' must be a boolean"))),
-        None => Ok(false),
-    }
-}
-
-fn optional_rect_usize(dict: &Bound<PyDict>, key: &str) -> PyResult<usize> {
-    match dict.get_item(key)? {
-        Some(value) => value
-            .extract::<usize>()
-            .map_err(|_| PyValueError::new_err(format!("layout rect '{key}' must be an integer"))),
-        None => Ok(0),
-    }
+/// Block for the next event WITHOUT drawing. Used by the surface when
+/// nothing is dirty — the dirty graph gates the rebuild, so idle frames
+/// skip tree resolution, layout, and painting entirely.
+#[pyfunction]
+fn tui_wait_event(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let event = py
+        .detach(render::read_event)
+        .map_err(PyRuntimeError::new_err)?;
+    event_to_py(py, &event)
 }
 
 #[pymodule]
 fn _sidol_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraph>()?;
+    m.add_class::<PyLayoutSnapshot>()?;
     m.add_function(wrap_pyfunction!(compute_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_layout_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(tui_init, m)?)?;
     m.add_function(wrap_pyfunction!(tui_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(tui_size, m)?)?;
     m.add_function(wrap_pyfunction!(tui_render_frame, m)?)?;
+    m.add_function(wrap_pyfunction!(tui_wait_event, m)?)?;
     Ok(())
 }

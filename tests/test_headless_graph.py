@@ -1390,18 +1390,18 @@ def test_scrollview_keyboard_scrolls_when_focused() -> None:
     sv = app.root.scroller
     assert sv.scroll_y == 0
     _tui_step(
-        surface, "key@down", 0, callbacks=[],
-        button_callbacks=[], targets=targets, rects=[],
+        surface, _key_event("down"), 0,
+        button_callbacks=[], targets=targets,
     )
     assert sv.scroll_y == 1
     _tui_step(
-        surface, "key@down", 0, callbacks=[],
-        button_callbacks=[], targets=targets, rects=[],
+        surface, _key_event("down"), 0,
+        button_callbacks=[], targets=targets,
     )
     assert sv.scroll_y == 2
     _tui_step(
-        surface, "key@up", 0, callbacks=[],
-        button_callbacks=[], targets=targets, rects=[],
+        surface, _key_event("up"), 0,
+        button_callbacks=[], targets=targets,
     )
     assert sv.scroll_y == 1
 
@@ -1839,15 +1839,26 @@ def test_worker_join_requires_start() -> None:
         Worker(lambda: None).join()
 
 
-def _tui_step(surface, event, focused, *, callbacks, button_callbacks, targets, rects):
+def _key_event(
+    key: str, *, ctrl: bool = False, alt: bool = False, shift: bool = False
+) -> dict:
+    """Build a structured key event matching the engine's FFI protocol."""
+    return {"type": "key", "key": key, "ctrl": ctrl, "alt": alt, "shift": shift}
+
+
+def _click_event(x: float, y: float) -> dict:
+    return {"type": "click", "x": x, "y": y}
+
+
+def _tui_step(surface, event, focused, *, button_callbacks, targets, snapshot=None, root=None):
     """Helper: run one pure TUI dispatch step."""
     return surface._dispatch(
         event,
         focused,
-        callbacks=callbacks,
         button_callbacks=button_callbacks,
         targets=targets,
-        rects=rects,
+        snapshot=snapshot,
+        root=root,
     )
 
 
@@ -1861,43 +1872,41 @@ def test_tui_dispatch_focus_navigation_and_activation() -> None:
         Button("b", on_click=lambda: called.append("b")),
     )
     surface = TuiSurface(None)  # type: ignore[arg-type]
-    callbacks = surface._focus_callbacks(tree)
     button_callbacks = surface._button_callbacks(tree)
     targets = surface._focus_targets(tree)
-    rects: list[dict] = []
 
     focused = -1
     focused, quit = _tui_step(
-        surface, "focus_next", focused, callbacks=callbacks,
-        button_callbacks=button_callbacks, targets=targets, rects=rects,
+        surface, _key_event("tab"), focused,
+        button_callbacks=button_callbacks, targets=targets,
     )
     assert (focused, quit) == (0, False)
     _tui_step(
-        surface, "activate", focused, callbacks=callbacks,
-        button_callbacks=button_callbacks, targets=targets, rects=rects,
+        surface, _key_event("enter"), focused,
+        button_callbacks=button_callbacks, targets=targets,
     )
     assert called == ["a"]
 
     focused, _ = _tui_step(
-        surface, "focus_next", focused, callbacks=callbacks,
-        button_callbacks=button_callbacks, targets=targets, rects=rects,
+        surface, _key_event("tab"), focused,
+        button_callbacks=button_callbacks, targets=targets,
     )
     assert focused == 1
     _tui_step(
-        surface, "activate", focused, callbacks=callbacks,
-        button_callbacks=button_callbacks, targets=targets, rects=rects,
+        surface, _key_event(" "), focused,
+        button_callbacks=button_callbacks, targets=targets,
     )
     assert called == ["a", "b"]
 
     focused, _ = _tui_step(
-        surface, "focus_prev", focused, callbacks=callbacks,
-        button_callbacks=button_callbacks, targets=targets, rects=rects,
+        surface, _key_event("backtab"), focused,
+        button_callbacks=button_callbacks, targets=targets,
     )
     assert focused == 0
 
     _, quit = _tui_step(
-        surface, "quit", focused, callbacks=callbacks,
-        button_callbacks=button_callbacks, targets=targets, rects=rects,
+        surface, _key_event("c", ctrl=True), focused,
+        button_callbacks=button_callbacks, targets=targets,
     )
     assert quit is True
 
@@ -1923,29 +1932,31 @@ def test_tui_dispatch_keyboard_typing_to_textfield() -> None:
 
     for char in "hi":
         focused, _ = _tui_step(
-            surface, f"key@{char}", focused, callbacks=[],
-            button_callbacks=[], targets=targets, rects=[],
+            surface, _key_event(char), focused,
+            button_callbacks=[], targets=targets,
         )
     assert form.field.value == "hi"
 
     focused, _ = _tui_step(
-        surface, "key@backspace", focused, callbacks=[],
-        button_callbacks=[], targets=targets, rects=[],
+        surface, _key_event("backspace"), focused,
+        button_callbacks=[], targets=targets,
     )
     assert form.field.value == "h"
 
     focused, _ = _tui_step(
-        surface, "key@home", focused, callbacks=[],
-        button_callbacks=[], targets=targets, rects=[],
+        surface, _key_event("home"), focused,
+        button_callbacks=[], targets=targets,
     )
     focused, _ = _tui_step(
-        surface, "key@a", focused, callbacks=[],
-        button_callbacks=[], targets=targets, rects=[],
+        surface, _key_event("a"), focused,
+        button_callbacks=[], targets=targets,
     )
     assert form.field.value == "ah"
 
 
 def test_tui_mouse_click_dispatches_button() -> None:
+    from sidol._sidol_core import compute_layout_snapshot
+
     from sidol.surfaces.tui import TuiSurface
     from sidol.widgets import Button, Column
 
@@ -1954,8 +1965,8 @@ def test_tui_mouse_click_dispatches_button() -> None:
         Button("one", on_click=lambda: called.append("one")),
         Button("two", on_click=lambda: called.append("two")),
     )
-    app = App(None)  # type: ignore[arg-type]
-    rects = app.compute_layout(200, 100, tree=tree)
+    snapshot = compute_layout_snapshot(tree, 200.0, 100.0)
+    rects = snapshot.to_dicts()
     button_rects = [r for r in rects if r["kind"] == "button"]
     assert len(button_rects) >= 2
 
@@ -1965,19 +1976,18 @@ def test_tui_mouse_click_dispatches_button() -> None:
     second = button_rects[1]
     _tui_step(
         surface,
-        f"click@{second['x'] + second['w'] / 2:.0f}@{second['y'] + second['h'] / 2:.0f}",
+        _click_event(second["x"] + second["w"] / 2, second["y"] + second["h"] / 2),
         -1,
-        callbacks=[],
         button_callbacks=button_callbacks,
         targets=[],
-        rects=rects,
+        snapshot=snapshot,
     )
     assert called == ["two"]
 
     called.clear()
     _tui_step(
-        surface, "click@999@999", -1, callbacks=[],
-        button_callbacks=button_callbacks, targets=[], rects=rects,
+        surface, _click_event(999, 999), -1,
+        button_callbacks=button_callbacks, targets=[], snapshot=snapshot,
     )
     assert called == []
 
@@ -1993,14 +2003,15 @@ def test_tui_run_loop_quits_and_cleans_up(monkeypatch) -> None:
 
     init_calls: list[int] = []
     cleanup_calls: list[int] = []
-    events = iter(["quit"])
+    events = iter([_key_event("c", ctrl=True)])
 
     monkeypatch.setattr(tui_module, "tui_init", lambda: init_calls.append(1))
     monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
     monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
     monkeypatch.setattr(
-        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+        tui_module, "tui_render_frame", lambda snapshot, idx: next(events)
     )
+    monkeypatch.setattr(tui_module, "tui_wait_event", lambda: next(events))
 
     TuiSurface(App(Root())).run()
     assert init_calls == [1]
@@ -2022,7 +2033,7 @@ def test_tui_cleanup_runs_when_rendering_raises(monkeypatch) -> None:
     monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
     monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
 
-    def boom(rects, idx) -> str:
+    def boom(snapshot, idx) -> dict:
         raise RuntimeError("render failed")
 
     monkeypatch.setattr(tui_module, "tui_render_frame", boom)
@@ -2054,10 +2065,11 @@ def test_tui_hot_reload_swaps_app_on_file_change(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(tui_module, "tui_init", lambda: None)
     monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
     monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
-    events = iter(["tick", "quit"])
+    events = iter([{"type": "tick"}, _key_event("c", ctrl=True)])
     monkeypatch.setattr(
-        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+        tui_module, "tui_render_frame", lambda snapshot, idx: next(events)
     )
+    monkeypatch.setattr(tui_module, "tui_wait_event", lambda: next(events))
 
     surface = TuiSurface(App(Root()), watch=[str(watched)], reloader=reloader)
     # Force a change to be detected on the first tick.
@@ -2091,10 +2103,11 @@ def test_tui_hot_reload_keeps_app_when_reloader_returns_none(
     monkeypatch.setattr(tui_module, "tui_init", lambda: None)
     monkeypatch.setattr(tui_module, "tui_cleanup", lambda: None)
     monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
-    events = iter(["tick", "quit"])
+    events = iter([{"type": "tick"}, _key_event("c", ctrl=True)])
     monkeypatch.setattr(
-        tui_module, "tui_render_frame", lambda rects, idx: next(events)
+        tui_module, "tui_render_frame", lambda snapshot, idx: next(events)
     )
+    monkeypatch.setattr(tui_module, "tui_wait_event", lambda: next(events))
 
     original = App(Root())
     surface = TuiSurface(original, watch=[str(watched)], reloader=reloader)
@@ -2193,3 +2206,367 @@ def test_html_uses_themed_radius_and_spacing() -> None:
         assert "border-radius:12px" in _nest_by_depth(rounded)
     finally:
         set_theme(Theme())
+
+
+# --- Regression tests: structured events, scheduler, and widget keys --- #
+
+
+def test_state_rewrite_same_value_does_not_mark_dirty() -> None:
+    """Idempotent writes must not re-dirty the component — otherwise
+    clamped writes (e.g. scroll_by at 0) re-render forever."""
+    counter = Counter()
+    counter.rendered_view()
+    _graph.clear_dirty()
+
+    counter.count = 0  # same value as current
+    assert _graph.dirty_ids() == []
+
+    counter.count = 1  # a real change still propagates
+    assert counter._view_signal_id in _graph.dirty_ids()
+
+
+def test_typing_q_into_focused_textfield_does_not_quit() -> None:
+    """Regression: the engine once mapped 'q' to "quit" before Python
+    dispatch, making the letter untypable in text inputs."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, TextField
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.field = TextField(initial="")
+
+        def view(self) -> Node:
+            return Column(self.field)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+
+    _, quit = _tui_step(
+        surface, _key_event("q"), 0,
+        button_callbacks=[], targets=targets, root=tree,
+    )
+    assert quit is False
+    assert form.field.value == "q"
+
+
+def test_textfield_types_uppercase_and_symbols() -> None:
+    """Regression: the engine once lowercased every character and dropped
+    symbols, making e.g. email addresses untypable."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, TextField
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.field = TextField(initial="")
+
+        def view(self) -> Node:
+            return Column(self.field)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+
+    for char in "A@b.1":
+        _tui_step(
+            surface, _key_event(char, shift=char in "A@"), 0,
+            button_callbacks=[], targets=targets, root=tree,
+        )
+    assert form.field.value == "A@b.1"
+
+
+def test_ctrl_modified_char_does_not_insert_text() -> None:
+    """Ctrl/alt combos are commands, not text input — the wildcard
+    handler must not swallow them."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column, TextField
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.field = TextField(initial="")
+
+        def view(self) -> Node:
+            return Column(self.field)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+
+    _, quit = _tui_step(
+        surface, _key_event("x", ctrl=True), 0,
+        button_callbacks=[], targets=targets, root=tree,
+    )
+    assert quit is False
+    assert form.field.value == ""
+
+
+def test_ctrl_c_quits_at_surface_level() -> None:
+    from sidol.surfaces.tui import TuiSurface
+
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    _, quit = _tui_step(
+        surface, _key_event("c", ctrl=True), -1,
+        button_callbacks=[], targets=[],
+    )
+    assert quit is True
+
+
+def test_root_on_key_fallback_and_request_quit() -> None:
+    """App-level bindings live on the root node; they fire when the
+    focused widget (or no widget) doesn't handle the key."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    class Root(Component):
+        def view(self) -> Node:
+            return Column(
+                Button("x", on_click=lambda: None),
+                on_key={"q": lambda event: app.request_quit()},
+            )
+
+    app = App(Root())
+    tree = app.build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+
+    # Focused button doesn't bind "q" → root fallback fires.
+    _, quit = _tui_step(
+        surface, _key_event("q"), 0,
+        button_callbacks=[], targets=targets, root=tree,
+    )
+    assert quit is False  # dispatch itself doesn't quit...
+    assert app._quit_requested is True  # ...the app flag does
+
+    # Unrelated keys hit no binding and change nothing.
+    app2_root = Root()
+    app2 = App(app2_root)
+    tree2 = app2.build_tree()
+    _tui_step(
+        surface, _key_event("z"), -1,
+        button_callbacks=[], targets=surface._focus_targets(tree2), root=tree2,
+    )
+    assert app2._quit_requested is False
+
+
+def test_normalise_key_preserves_single_char_case() -> None:
+    from sidol.events import normalise_key
+
+    assert normalise_key("A") == "A"
+    assert normalise_key("@") == "@"
+    assert normalise_key("ESCAPE") == "esc"
+    assert normalise_key("Arrow_Up") == "up"
+
+
+def test_click_hit_test_accounts_for_scroll_offset() -> None:
+    """Regression: clicks were tested against layout coordinates while
+    the renderer draws scrolled content offset — scrolled buttons were
+    hit where they *were*, not where they're *drawn*."""
+    from sidol._sidol_core import compute_layout_snapshot
+
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+    from sidol.widgets.scroll import ScrollView
+
+    called: list[str] = []
+
+    class Scroller(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scroller = ScrollView(
+                Column(
+                    Button("top", on_click=lambda: called.append("top")),
+                    Button("mid", on_click=lambda: called.append("mid")),
+                    Button("bot", on_click=lambda: called.append("bot")),
+                ),
+                max_h=3,
+            )
+            # Scroll so "top" leaves the viewport and "mid" slides into place.
+            self.scroller.scroll_to(y=3)
+
+        def view(self) -> Node:
+            return self.scroller
+
+    app = App(Scroller())
+    tree = app.build_tree()
+    snapshot = compute_layout_snapshot(tree, 40.0, 10.0)
+    rects = snapshot.to_dicts()
+    buttons = [r for r in rects if r["kind"] == "button"]
+    assert len(buttons) == 3
+
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    button_callbacks = surface._button_callbacks(tree)
+
+    # "mid" is laid out 3 rows below "top" (each button is 3 rows tall);
+    # scrolled by 3, it is DRAWN where "top" was laid out.
+    mid = buttons[1]
+    _tui_step(
+        surface,
+        _click_event(mid["x"] + 1, mid["y"] - 3 + 1),
+        -1,
+        button_callbacks=button_callbacks,
+        targets=[],
+        snapshot=snapshot,
+        root=tree,
+    )
+    assert called == ["mid"]
+
+    # Clicking "top"'s layout position must not hit it — it's clipped
+    # away; the visible button there is "mid".
+    called.clear()
+    top = buttons[0]
+    _tui_step(
+        surface,
+        _click_event(top["x"] + 1, top["y"] + 1),
+        -1,
+        button_callbacks=button_callbacks,
+        targets=[],
+        snapshot=snapshot,
+        root=tree,
+    )
+    assert called == ["mid"]
+
+
+def test_dropdown_keyboard_interaction() -> None:
+    """Dropdown is focusable and fully keyboard-operable."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column
+    from sidol.widgets.dropdown import Dropdown
+
+    selections: list[str] = []
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dropdown = Dropdown(
+                ["a", "b", "c"],
+                on_select=lambda i, v: selections.append(v),
+            )
+
+        def view(self) -> Node:
+            return Column(self.dropdown)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+    assert len(targets) == 1  # the dropdown is a focus target
+
+    def press(key: str) -> None:
+        _tui_step(
+            surface, _key_event(key), 0,
+            button_callbacks=[], targets=targets, root=tree,
+        )
+
+    press("enter")  # opens
+    assert form.dropdown.is_open is True
+    press("down")  # highlights first option
+    assert form.dropdown.selected == 0
+    press("down")
+    assert form.dropdown.selected == 1
+    press("enter")  # commits
+    assert form.dropdown.is_open is False
+    assert selections == ["b"]
+
+    press("down")  # re-opens
+    assert form.dropdown.is_open is True
+    press("esc")  # cancels without selecting
+    assert form.dropdown.is_open is False
+    assert selections == ["b"]
+
+
+def test_dropdown_windows_long_option_lists() -> None:
+    """The highlight stays visible when selection moves past max_height."""
+    from sidol.widgets.dropdown import Dropdown
+
+    dd = Dropdown([f"opt-{i}" for i in range(10)], max_height=3)
+    dd.open()
+    dd.selected = 7
+    texts = _collect_text(dd.rendered_view())
+    assert any("> opt-7" in t for t in texts)
+    assert not any("opt-0" in t for t in texts)  # scrolled out of the window
+
+
+def test_slider_keyboard_adjusts_value() -> None:
+    """Slider is focusable and keyboard-operable."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Column
+    from sidol.widgets.slider import Slider
+
+    class Form(Component):
+        def __init__(self) -> None:
+            super().__init__()
+            self.slider = Slider(min_val=0.0, max_val=10.0, step=2.0, value=4.0)
+
+        def view(self) -> Node:
+            return Column(self.slider)
+
+    form = Form()
+    tree = App(form).build_tree()
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+    targets = surface._focus_targets(tree)
+    assert len(targets) == 1
+
+    def press(key: str) -> None:
+        _tui_step(
+            surface, _key_event(key), 0,
+            button_callbacks=[], targets=targets, root=tree,
+        )
+
+    press("right")
+    assert form.slider.value == 6.0
+    press("left")
+    assert form.slider.value == 4.0
+    press("end")
+    assert form.slider.value == 10.0
+    press("home")
+    assert form.slider.value == 0.0
+
+
+def test_pump_workers_delivers_completion() -> None:
+    import time
+
+    from sidol.concurrency import Worker, pump_workers
+
+    done: list[str] = []
+    worker = Worker(lambda: "result", on_done=lambda r: done.append(r))
+    worker.start()
+    while not worker.poll():
+        time.sleep(0.01)
+    assert pump_workers() == 1
+    assert done == ["result"]
+    assert pump_workers() == 0  # collected workers are not re-delivered
+
+
+def test_pump_workers_reports_errors(capsys) -> None:
+    import time
+
+    from sidol.concurrency import Worker, pump_workers
+
+    def boom() -> None:
+        raise ValueError("nope")
+
+    worker = Worker(boom)
+    worker.start()
+    while not worker.poll():
+        time.sleep(0.01)
+    assert pump_workers() == 1
+    assert "nope" in capsys.readouterr().err
+
+
+def test_layout_snapshot_materialises_dicts() -> None:
+    """The snapshot handle carries the same data as the dict API."""
+    from sidol._sidol_core import compute_layout, compute_layout_snapshot
+
+    from sidol.widgets import Button, Column, Text
+
+    tree = Column(Text("hi"), Button("go"), spacing=1)
+    via_dicts = compute_layout(tree, 200.0, 100.0)
+    snapshot = compute_layout_snapshot(tree, 200.0, 100.0)
+    assert len(snapshot) == len(via_dicts)
+    assert snapshot.to_dicts() == via_dicts

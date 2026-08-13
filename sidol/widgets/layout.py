@@ -5,9 +5,15 @@ a kind tag the render surface dispatches on: row, column, spacer.
 
 Same model as SwiftUI's VStack/HStack/Spacer and Flutter's Row/Column/Expanded.
 Flexbox via the `taffy` crate (Phase 1) provides the underlying layout engine.
+
+Containers accept ``on_key``/``on_focus``/``on_click`` like leaf widgets.
+A handler on the root container doubles as an app-level key binding: the
+TUI surface dispatches unhandled keys to the root node (e.g. "q" to quit).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from sidol.node import Node
 
@@ -20,6 +26,9 @@ def Row(
     max_w: int | None = None,
     max_h: int | None = None,
     padding: int = 0,
+    on_click: Callable[[], None] | None = None,
+    on_key: dict[str, Callable[..., object]] | None = None,
+    on_focus: Callable[..., object] | None = None,
 ) -> Node:
     props: dict = {"spacing": spacing, "padding": padding}
     if min_w is not None:
@@ -30,7 +39,14 @@ def Row(
         props["max_w"] = float(max_w)
     if max_h is not None:
         props["max_h"] = float(max_h)
-    return Node(kind="row", props=props, children=children)
+    return Node(
+        kind="row",
+        props=props,
+        children=children,
+        on_click=on_click,
+        on_key=on_key,
+        on_focus=on_focus,
+    )
 
 
 def Column(
@@ -41,6 +57,9 @@ def Column(
     max_w: int | None = None,
     max_h: int | None = None,
     padding: int = 0,
+    on_click: Callable[[], None] | None = None,
+    on_key: dict[str, Callable[..., object]] | None = None,
+    on_focus: Callable[..., object] | None = None,
 ) -> Node:
     props: dict = {"spacing": spacing, "padding": padding}
     if min_w is not None:
@@ -51,7 +70,14 @@ def Column(
         props["max_w"] = float(max_w)
     if max_h is not None:
         props["max_h"] = float(max_h)
-    return Node(kind="column", props=props, children=children)
+    return Node(
+        kind="column",
+        props=props,
+        children=children,
+        on_click=on_click,
+        on_key=on_key,
+        on_focus=on_focus,
+    )
 
 
 def Spacer() -> Node:

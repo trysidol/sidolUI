@@ -26,6 +26,7 @@ class Colors:
     danger: str = "#FF3B30"
     surface: str = "#FFFFFF"
     text: str = "#000000"
+    muted: str = "#888888"
 
 
 @dataclass(frozen=True, slots=True)
