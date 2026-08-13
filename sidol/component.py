@@ -101,6 +101,13 @@ class State:
     def __get__(self, instance: Component | None, owner: type | None = None) -> Any:
         if instance is None:
             return self
+        if instance._disposed:
+            if self._name in instance._state_values:
+                return instance._state_values[self._name]
+            raise AttributeError(
+                f"State field '{self._name}' on disposed "
+                f"{type(instance).__name__} has no stored value."
+            )
         if self._name not in instance._signal_ids:
             raise AttributeError(
                 f"State field '{self._name}' on {type(instance).__name__} "
@@ -113,6 +120,12 @@ class State:
         return instance._state_values[self._name]
 
     def __set__(self, instance: Component, value: Any) -> None:
+        if instance._disposed:
+            # Writes to a disposed component (e.g. a worker callback landing
+            # after hot-reload) store the value but must not create new graph
+            # signals or mark dirty nodes — the graph no longer owns it.
+            instance._state_values[self._name] = value
+            return
         signal_ids = instance._signal_ids
         if self._name not in signal_ids:
             signal_ids[self._name] = _graph.create_signal()
@@ -160,6 +173,39 @@ class Component:
         # View computation signal — dirty means view() output is stale.
         self._view_signal_id = _graph.create_signal()
         _computations[self._view_signal_id] = self
+        # Lifecycle state: True once dispose() has run.
+        self._disposed = False
+
+    def dispose(self) -> None:
+        """Deterministically release this component's graph nodes.
+
+        Removes the view signal and all state signals from the process-wide
+        graph, unregisters the component from ``_computations``, and disposes
+        every retained/keyed child recursively. Idempotent — safe to call
+        multiple times.
+
+        Subclasses holding external resources (workers, sockets, file
+        handles) should override ``dispose()``, release their resources, and
+        call ``super().dispose()``.
+        """
+        if self._disposed:
+            return
+        self._disposed = True
+        _graph.remove_signal(self._view_signal_id)
+        _computations.pop(self._view_signal_id, None)
+        for signal_id in self._signal_ids.values():
+            _graph.remove_signal(signal_id)
+        self._signal_ids.clear()
+        # Snapshot before iterating: a concurrent build_tree()/remember() on
+        # another thread (e.g. DevServer watcher vs app-thread flush) can
+        # mutate these dicts mid-iteration. tuple() makes disposal immune.
+        for child in tuple(self._retained_children.values()):
+            child.dispose()
+        self._retained_children.clear()
+        for child in tuple(self._keyed_children.values()):
+            child.dispose()
+        self._keyed_children.clear()
+        self._active_keyed_children.clear()
 
     def __del__(self) -> None:
         """Release this component's graph nodes when it is no longer used.
@@ -167,8 +213,12 @@ class Component:
         Components created during a render can otherwise leave orphaned
         topology in the process-wide graph after Python collects them.
         Destructors are best-effort because interpreter shutdown and the
-        test-only graph reset can invalidate these IDs first.
+        test-only graph reset can invalidate these IDs first. Prefer calling
+        ``dispose()`` deterministically (surfaces do this on teardown); this
+        is the safety net for components that are garbage-collected directly.
         """
+        if getattr(self, "_disposed", False):
+            return
         try:
             _graph.remove_signal(self._view_signal_id)
             for signal_id in self._signal_ids.values():
