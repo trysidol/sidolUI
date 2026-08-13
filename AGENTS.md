@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Product Direction
+
+Read `SIDOL_VISION.md` before making architectural, API, surface, performance,
+hot-reload, or roadmap decisions. It is the canonical product-direction
+document for Sidol.
+
 ## Purpose
 
 Sidol is a reactive Python UI framework backed by a Rust engine (PyO3).
@@ -20,6 +26,9 @@ toolchain — the engine is Rust, compiled once into a single `.pyd`.
   validated Python dictionaries for the surface boundary.
 - Python is the only interface. No DSL, no markup language.
 - Phase 1: TUI surface. Phase 2: GPU surface (wgpu). Terminal-first.
+- Accessibility semantics belong in the shared component model, not as a later
+  renderer-only retrofit.
+- The project is MIT-licensed; preserve the permissive licensing strategy.
 
 ## Goals (always advance these)
 
@@ -67,7 +76,7 @@ uv run python bench/bench_hotpath.py
 ## Structure
 
 - `sidol/` — Python framework: `State` descriptor, `Component`, `App`,
-  widgets, TUI surface, HTML preview, and CLI.
+  widgets, native TUI surface, optional static HTML tooling, and CLI.
 - `src/` — Rust engine: `graph.rs` (reactive signals), `layout.rs`
   (Taffy flexbox), `render/` (ratatui/crossterm). PyO3 cdylib `_sidol_core`.
 - `tests/` — Python tests.
@@ -75,6 +84,10 @@ uv run python bench/bench_hotpath.py
 ## Notes
 
 - Pre-alpha 0.1.0. API can change between MINOR versions.
+- Lifecycle contract: `Component.dispose()` / `App.dispose()` deterministically
+  tear down graph nodes and retained/keyed children. Surfaces must dispose the
+  old app on hot-reload swap and on exit — do not rely on `__del__` (best-effort
+  safety net only).
 - Status is deliberate: `build` bundling, GPU, and mouse-wheel gestures
   remain on the roadmap. Native `sidol dev` hot-reload, focused `ScrollView`
   scrolling, explicit and auto-keyed list children (`List(key=...)`),
