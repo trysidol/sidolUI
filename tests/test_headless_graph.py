@@ -2559,6 +2559,45 @@ def test_pump_workers_reports_errors(capsys) -> None:
     assert "nope" in capsys.readouterr().err
 
 
+def test_pump_workers_collects_worker_dropped_after_completion() -> None:
+    """Regression: a Worker's completion callback must still fire when the
+    caller drops its reference before pump_workers() runs. The registry is
+    a strong set — the worker stays alive until collected."""
+    import gc
+    import time
+
+    from sidol.concurrency import Worker, pump_workers
+
+    done: list[str] = []
+    worker = Worker(lambda: "result", on_done=lambda r: done.append(r))
+    worker.start()
+    while not worker.poll():
+        time.sleep(0.01)
+    # Simulate abandonment after the thread has finished; under a WeakSet
+    # registry this would be garbage-collected before the next pump.
+    del worker
+    gc.collect()
+    assert pump_workers() == 1
+    assert done == ["result"]
+
+
+def test_pump_workers_swallows_systemexit(capsys) -> None:
+    """A worker raising SystemExit/KeyboardInterrupt must not kill the loop."""
+    import time
+
+    from sidol.concurrency import Worker, pump_workers
+
+    def boom() -> None:
+        raise SystemExit(1)
+
+    worker = Worker(boom)
+    worker.start()
+    while not worker.poll():
+        time.sleep(0.01)
+    assert pump_workers() == 1
+    assert "1" in capsys.readouterr().err
+
+
 def test_layout_snapshot_materialises_dicts() -> None:
     """The snapshot handle carries the same data as the dict API."""
     from sidol._sidol_core import compute_layout, compute_layout_snapshot

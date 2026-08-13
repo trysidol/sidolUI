@@ -80,13 +80,17 @@ class TuiSurface:
             while True:
                 if need_render:
                     viewport_w, viewport_h = tui_size()
+                    # Clear pre-render dirtiness first: build_tree() re-renders
+                    # every component, consuming all currently-dirty signals.
+                    # Writes made *during* a view() (side effects) mark new
+                    # dirtiness that survives to gate the next rebuild —
+                    # matching flush()'s defer-to-next-tick semantics rather
+                    # than being swallowed by a blanket clear after the render.
+                    _graph.clear_dirty()
                     tree = self._app.build_tree()
                     snapshot = compute_layout_snapshot(
                         tree, float(viewport_w), float(viewport_h)
                     )
-                    # The full rebuild consumed every dirty signal; a clean
-                    # graph is what gates the next rebuild.
-                    _graph.clear_dirty()
                     targets = self._focus_targets(tree)
                     button_callbacks = self._button_callbacks(tree)
                     focus_rects = self._focus_rect_indices(tree)

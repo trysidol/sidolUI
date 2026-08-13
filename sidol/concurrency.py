@@ -38,16 +38,18 @@ from __future__ import annotations
 
 import sys
 import threading
-import weakref
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 T = TypeVar("T")
 
-# Workers that have been started and not yet collected. WeakSet so an
-# abandoned worker doesn't leak. The TUI surface drains this on every
-# event-loop tick via pump_workers().
-_active_workers: weakref.WeakSet[Worker] = weakref.WeakSet()
+# Workers that have been started and not yet collected. A strong set: an
+# in-flight worker must stay alive until pump_workers()/join() collects
+# it. Relying on the thread's bound-method reference is not enough —
+# CPython drops the target once the thread finishes, so an abandoned
+# worker would otherwise be garbage-collected before its completion
+# callback fires. The TUI surface drains this on every event-loop tick.
+_active_workers: set[Worker] = set()
 
 
 class Worker:
@@ -125,6 +127,7 @@ class Worker:
                 self._commit()
             if self._on_done is not None:
                 self._on_done(result)  # type: ignore[arg-type]
+        _active_workers.discard(self)
         if flush is not None:
             flush()
         return result  # type: ignore[return-value]
@@ -161,7 +164,9 @@ def pump_workers(flush: Callable[[], Any] | None = None) -> int:
             continue
         try:
             worker.join(flush=flush)
-        except Exception as exc:
+        except BaseException as exc:
+            # Catch BaseException (not Exception) so a worker that raised
+            # SystemExit/KeyboardInterrupt also can't kill the loop.
             print(f"[sidol] worker failed: {exc}", file=sys.stderr)
         finally:
             _active_workers.discard(worker)
