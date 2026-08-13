@@ -105,13 +105,12 @@ Working:
 - Stable child identity via `Component.remember()` and `Component.keyed()`
 - `List` with auto-keyed reconciliation (`key=` keeps item state across reorders)
 - Programmatic design system: `Theme`, `Style`, `resolve_style()`
-- `Worker` background tasks
+- `Worker` background tasks and `run_async` coroutine helpers
 - Headless mode for tests without a screen
 
 Not yet:
 - `sidol build` bundling (the command is an explicit stub)
 - GPU surface (wgpu)
-- Async coroutine helpers
 - Mouse-wheel gestures (arrow-key scrolling is available)
 
 HTML export and `DevServer` remain explicit development APIs, not the default
