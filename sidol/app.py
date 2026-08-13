@@ -88,6 +88,12 @@ class App:
             if isinstance(child, Component):
                 if getattr(child, "key", None) is not None:
                     key = child.key
+                    if key in owner._active_keyed_children:
+                        raise ValueError(
+                            f"duplicate child key {key!r} under "
+                            f"{type(owner).__name__}"
+                        )
+                    owner._active_keyed_children.add(key)
                     existing = owner._keyed_children.get(key)
                     if existing is not None:
                         if type(existing) is not type(child):
@@ -98,7 +104,6 @@ class App:
                         child = existing
                     else:
                         owner._keyed_children[key] = child
-                    owner._active_keyed_children.add(key)
                 resolved.append(self._resolve_component_tree(child, active))
                 changed = True
             elif isinstance(child, Node):

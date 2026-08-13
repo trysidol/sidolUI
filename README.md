@@ -103,6 +103,7 @@ Working:
 - TUI event loop with focus navigation, mouse clicks, and disabled controls
 - `sidol dev` native launcher with hot-reload (`--no-watch` to disable)
 - Stable child identity via `Component.remember()` and `Component.keyed()`
+- `List` with auto-keyed reconciliation (`key=` keeps item state across reorders)
 - Programmatic design system: `Theme`, `Style`, `resolve_style()`
 - `Worker` background tasks
 - Headless mode for tests without a screen
@@ -112,7 +113,6 @@ Not yet:
 - GPU surface (wgpu)
 - Async coroutine helpers
 - Mouse-wheel gestures (arrow-key scrolling is available)
-- Automatic keyed list diffing beyond explicit `Component.keyed()` children
 
 HTML export and `DevServer` remain explicit development APIs, not the default
 `sidol dev` surface.
