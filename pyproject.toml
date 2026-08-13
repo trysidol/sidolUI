@@ -35,6 +35,10 @@ dev = [
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "sidol._sidol_core"
+include = [
+    { path = "sidol/py.typed", format = "sdist" },
+    { path = "sidol/py.typed", format = "wheel" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

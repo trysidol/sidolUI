@@ -179,10 +179,8 @@ def _html_template(
     var root = document.getElementById("sidol-root");
     if (root) {{ root.innerHTML = evt.data; }}
   }};
-  es.onerror = function() {{
-    // Reconnect after 1s on connection loss.
-    setTimeout(function() {{ es.close(); }}, 1000);
-  }};
+  // No onerror handler: EventSource reconnects automatically when the
+  // connection drops. Calling close() here would defeat that.
 }})();
 </script>
 """

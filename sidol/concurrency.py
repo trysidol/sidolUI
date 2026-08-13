@@ -36,11 +36,18 @@ Usage::
 
 from __future__ import annotations
 
+import sys
 import threading
+import weakref
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+# Workers that have been started and not yet collected. WeakSet so an
+# abandoned worker doesn't leak. The TUI surface drains this on every
+# event-loop tick via pump_workers().
+_active_workers: weakref.WeakSet[Worker] = weakref.WeakSet()
 
 
 class Worker:
@@ -50,7 +57,9 @@ class Worker:
     ``join`` collects the result. The callback runs on the joining thread.
 
     If *commit* is provided, it is called by ``join`` after the function
-    succeeds. The caller must ensure ``App.flush()`` is called afterwards.
+    succeeds. In the TUI event loop, ``pump_workers()`` collects finished
+    workers automatically on every tick; headless callers use ``join()``
+    or ``pump_workers(flush=app.flush)``.
     """
 
     def __init__(
@@ -71,11 +80,17 @@ class Worker:
         self._completion_delivered = False
 
     def start(self) -> None:
-        """Launch the background thread. Non-blocking."""
+        """Launch the background thread. Non-blocking.
+
+        Registers the worker for automatic collection — the TUI event
+        loop calls ``pump_workers()`` on every tick, so completion
+        callbacks fire without manual ``join`` calls.
+        """
         with self._lock:
             if self._started:
                 raise RuntimeError("Worker can only be started once")
             self._started = True
+        _active_workers.add(self)
         self._thread = threading.Thread(target=self._run, daemon=True, name="sidol-worker")
         self._thread.start()
 
@@ -129,3 +144,26 @@ class Worker:
         """The exception, or None if the worker succeeded."""
         with self._lock:
             return self._error
+
+
+def pump_workers(flush: Callable[[], Any] | None = None) -> int:
+    """Collect finished workers, delivering their completion callbacks.
+
+    Returns the number of workers collected. The TUI surface calls this
+    on every event-loop tick; headless code calls it manually (pass
+    ``flush=app.flush`` to propagate state changes made by callbacks).
+    Worker exceptions are reported to stderr and swallowed — a failed
+    background task must not kill the event loop.
+    """
+    delivered = 0
+    for worker in list(_active_workers):
+        if not worker.poll():
+            continue
+        try:
+            worker.join(flush=flush)
+        except Exception as exc:
+            print(f"[sidol] worker failed: {exc}", file=sys.stderr)
+        finally:
+            _active_workers.discard(worker)
+        delivered += 1
+    return delivered

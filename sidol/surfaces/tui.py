@@ -5,6 +5,17 @@ surface class. The ``TuiSurface`` owns the terminal lifecycle (init,
 render loop, cleanup), focus navigation, callback dispatch, and optional
 hot-reload when watching app source files.
 
+The loop is dirty-gated: it only rebuilds the tree, recomputes layout,
+and redraws when the reactive graph holds dirty signals, the terminal
+was resized, or the app was hot-reloaded. Idle frames block in
+``tui_wait_event`` — no rebuild, no layout, no paint.
+
+Surface policy (kept here, not in the engine):
+  - Ctrl+C quits. Everything else is dispatched: focused widget first,
+    then the root node's ``on_key`` as an app-level fallback.
+  - Tab / Shift+Tab move focus; Enter/Space activate the focused widget.
+  - ``App.request_quit()`` (e.g. from a root key binding) exits the loop.
+
 ``App.run(surface=TuiSurface(app))`` delegates to this class.
 """
 
@@ -15,12 +26,16 @@ import sys
 from collections.abc import Callable
 
 from sidol._sidol_core import (
+    compute_layout_snapshot,
     tui_cleanup,
     tui_init,
     tui_render_frame,
     tui_size,
+    tui_wait_event,
 )
 from sidol.app import App
+from sidol.component import _graph
+from sidol.concurrency import pump_workers
 from sidol.events import FocusEvent, KeyEvent, normalise_key
 from sidol.node import Node
 
@@ -55,40 +70,57 @@ class TuiSurface:
         """Enter the TUI event loop. Blocks until the user quits."""
         tui_init()
         try:
-            viewport_w, viewport_h = tui_size()
-            focused_idx: int = -1  # index into buttons-only list (0..n-1), -1 = none
+            focused_idx: int = -1  # index into the focus-target list, -1 = none
+            need_render = True
+            tree: Node | None = None
+            snapshot = None
+            targets: list[Node] = []
+            button_callbacks: list[Callable[[], None] | None] = []
+            focus_rects: list[int] = []
             while True:
-                viewport_w, viewport_h = tui_size()
-                self._app.flush()
-                tree = self._app.build_tree()
-                rects = self._app.compute_layout(
-                    float(viewport_w), float(viewport_h), tree=tree
-                )
-                callbacks = self._focus_callbacks(tree)
-                button_callbacks = self._button_callbacks(tree)
-                targets = self._focus_targets(tree)
-                focus_rects = self._focus_rect_indices(tree)
-                rect_focused = (
-                    focus_rects[focused_idx]
-                    if 0 <= focused_idx < len(focus_rects)
-                    else -1
-                )
-                event = tui_render_frame(rects, rect_focused)
+                if need_render:
+                    viewport_w, viewport_h = tui_size()
+                    tree = self._app.build_tree()
+                    snapshot = compute_layout_snapshot(
+                        tree, float(viewport_w), float(viewport_h)
+                    )
+                    # The full rebuild consumed every dirty signal; a clean
+                    # graph is what gates the next rebuild.
+                    _graph.clear_dirty()
+                    targets = self._focus_targets(tree)
+                    button_callbacks = self._button_callbacks(tree)
+                    focus_rects = self._focus_rect_indices(tree)
+                    rect_focused = (
+                        focus_rects[focused_idx]
+                        if 0 <= focused_idx < len(focus_rects)
+                        else -1
+                    )
+                    event = tui_render_frame(snapshot, rect_focused)
+                else:
+                    event = tui_wait_event()
+                pump_workers()
                 focused_idx, quit = self._dispatch(
                     event,
                     focused_idx,
-                    callbacks=callbacks,
                     button_callbacks=button_callbacks,
                     targets=targets,
-                    rects=rects,
+                    snapshot=snapshot,
+                    root=tree,
                 )
-                if quit:
+                if quit or self._app._quit_requested:
                     break
+                swapped = False
                 if self._watch_paths:
                     new_app = self._maybe_reload()
                     if new_app is not None and new_app is not self._app:
                         self._app = new_app
                         focused_idx = -1
+                        swapped = True
+                need_render = (
+                    swapped
+                    or event.get("type") == "resize"
+                    or bool(_graph.dirty_ids())
+                )
         finally:
             tui_cleanup()
 
@@ -127,63 +159,88 @@ class TuiSurface:
 
     def _dispatch(
         self,
-        event: str,
+        event: dict,
         focused_idx: int,
         *,
-        callbacks: list[Callable[[], None] | None],
         button_callbacks: list[Callable[[], None] | None],
         targets: list[Node],
-        rects: list[dict],
+        snapshot,
+        root: Node | None,
     ) -> tuple[int, bool]:
-        """Handle one terminal event string. Returns ``(focused_idx, quit)``.
+        """Handle one terminal event dict. Returns ``(focused_idx, quit)``.
 
         Pure dispatch — no terminal IO — so the event loop is testable with
-        simulated event strings.
+        simulated event dicts.
         """
-        if event == "quit":
-            return focused_idx, True
-        if event == "focus_next":
-            next_idx = self._next_button(focused_idx, len(callbacks))
-            return self._change_focus(focused_idx, next_idx, targets), False
-        if event == "focus_prev":
-            previous_idx = self._prev_button(focused_idx, len(callbacks))
-            return self._change_focus(focused_idx, previous_idx, targets), False
-        if event == "activate":
-            if 0 <= focused_idx < len(callbacks):
-                cb = callbacks[focused_idx]
-                if cb is not None:
-                    cb()
-            return focused_idx, False
-        if event.startswith("click@"):
-            self._handle_click(event, rects, button_callbacks)
-            return focused_idx, False
-        if event.startswith("key@") and 0 <= focused_idx < len(targets):
-            key = normalise_key(event[4:])
-            handler = (targets[focused_idx].on_key or {}).get(key)
-            if handler is not None:
-                handler(KeyEvent(key))
+        event_type = event.get("type")
+        if event_type == "key":
+            return self._dispatch_key(
+                event, focused_idx, targets=targets, root=root
+            )
+        if event_type == "click" and snapshot is not None:
+            self._handle_click(event, snapshot, button_callbacks)
+        # tick / resize carry no dispatch work; the loop reacts to them.
         return focused_idx, False
+
+    def _dispatch_key(
+        self,
+        event: dict,
+        focused_idx: int,
+        *,
+        targets: list[Node],
+        root: Node | None,
+    ) -> tuple[int, bool]:
+        key = normalise_key(str(event.get("key", "")))
+        ctrl = bool(event.get("ctrl"))
+        alt = bool(event.get("alt"))
+        shift = bool(event.get("shift"))
+
+        # Surface-level policy: Ctrl+C quits. All other keys dispatch.
+        if ctrl and key == "c":
+            return focused_idx, True
+
+        if not ctrl and not alt:
+            if key == "tab":
+                next_idx = self._next_target(focused_idx, len(targets))
+                return self._change_focus(focused_idx, next_idx, targets), False
+            if key == "backtab":
+                previous_idx = self._prev_target(focused_idx, len(targets))
+                return self._change_focus(focused_idx, previous_idx, targets), False
+
+        key_event = KeyEvent(key, ctrl=ctrl, alt=alt, shift=shift)
+        target = targets[focused_idx] if 0 <= focused_idx < len(targets) else None
+        if target is not None:
+            handler = (target.on_key or {}).get(key)
+            if handler is None and self._is_printable(key, ctrl, alt):
+                handler = (target.on_key or {}).get("*")
+            if handler is not None:
+                handler(key_event)
+                return focused_idx, False
+            if key in ("enter", " ") and target.on_click is not None:
+                target.on_click()
+                return focused_idx, False
+
+        # App-level fallback: bindings on the root node (e.g. "q" to quit).
+        if root is not None:
+            root_handler = (root.on_key or {}).get(key)
+            if root_handler is None and self._is_printable(key, ctrl, alt):
+                root_handler = (root.on_key or {}).get("*")
+            if root_handler is not None:
+                root_handler(key_event)
+        return focused_idx, False
+
+    @staticmethod
+    def _is_printable(key: str, ctrl: bool, alt: bool) -> bool:
+        """Single-character keys without ctrl/alt are text input candidates."""
+        return len(key) == 1 and not ctrl and not alt
 
     # ------------------------------------------------------------------
     # Focus navigation helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _button_rect_index(rects: list[dict], button_idx: int) -> int:
-        """Return the index in *rects* for the *button_idx*-th button (0-based)."""
-        if button_idx < 0:
-            return -1
-        count = 0
-        for i, r in enumerate(rects):
-            if r["kind"] == "button" and not r.get("disabled", False):
-                if count == button_idx:
-                    return i
-                count += 1
-        return -1
-
-    @staticmethod
-    def _next_button(current: int, total: int) -> int:
-        """Cyclic next: advance the button index, wrapping to first."""
+    def _next_target(current: int, total: int) -> int:
+        """Cyclic next: advance the focus-target index, wrapping to first."""
         if total == 0:
             return -1
         if current < 0:
@@ -191,8 +248,8 @@ class TuiSurface:
         return (current + 1) % total
 
     @staticmethod
-    def _prev_button(current: int, total: int) -> int:
-        """Cyclic previous: step back the button index, wrapping to last."""
+    def _prev_target(current: int, total: int) -> int:
+        """Cyclic previous: step back the focus-target index, wrapping to last."""
         if total == 0:
             return -1
         if current <= 0:
@@ -201,24 +258,21 @@ class TuiSurface:
 
     def _handle_click(
         self,
-        event: str,
-        rects: list[dict],
-        callbacks: list[Callable[[], None] | None],
+        event: dict,
+        snapshot,
+        button_callbacks: list[Callable[[], None] | None],
     ) -> None:
-        """Handle a mouse click event. Event format: ``click@{col}@{row}``.
+        """Dispatch a mouse click to the topmost button under the cursor.
 
-        Hit-tests the click coordinates against all rects (last-to-first to
-        respect z-order), and dispatches the button's ``on_click`` callback
-        if a button was clicked.
+        Rects are materialised from the layout snapshot and translated
+        into screen coordinates with the same scroll-offset logic the
+        renderer uses — a scrolled ScrollView's children are hit-tested
+        where they are drawn, not where they were laid out.
         """
-        parts = event.split("@")
-        if len(parts) != 3:
-            return
-        try:
-            click_x = float(parts[1])
-            click_y = float(parts[2])
-        except ValueError:
-            return
+        click_x = float(event["x"])
+        click_y = float(event["y"])
+        rects = snapshot.to_dicts()
+        geometry = self._screen_geometry(rects)
 
         button_indices = {
             index: callback_index
@@ -231,17 +285,60 @@ class TuiSurface:
         # Walk rects in reverse so topmost (last-drawn) elements win.
         for i in range(len(rects) - 1, -1, -1):
             r = rects[i]
-            rx, ry = r["x"], r["y"]
-            rw, rh = r["w"], r["h"]
-            if rx <= click_x < rx + rw and ry <= click_y < ry + rh:
+            draw_x, draw_y, clipped = geometry[i]
+            if clipped:
+                continue
+            if draw_x <= click_x < draw_x + r["w"] and draw_y <= click_y < draw_y + r["h"]:
                 if r["kind"] == "button" and not r.get("disabled", False):
                     callback_index = button_indices.get(i)
-                    if callback_index is not None and callback_index < len(callbacks):
-                        cb = callbacks[callback_index]
+                    if callback_index is not None and callback_index < len(
+                        button_callbacks
+                    ):
+                        cb = button_callbacks[callback_index]
                         if cb is not None:
                             cb()
                     return
                 break
+
+    @staticmethod
+    def _screen_geometry(rects: list[dict]) -> list[tuple[float, float, bool]]:
+        """Translate layout rects to screen coordinates.
+
+        Returns ``(draw_x, draw_y, clipped)`` per rect, mirroring the
+        scroll-viewport logic in the Rust renderer (``render_frame``):
+        children of a scroll view are drawn at their layout position
+        minus the cumulative scroll offset of their ancestors, and
+        children outside a viewport are clipped. Keep in sync with
+        ``src/render/mod.rs``.
+        """
+        # Each stack entry: [depth, x, y, w, h, cumulative_offset_x, cumulative_offset_y]
+        stack: list[list[float]] = []
+        geometry: list[tuple[float, float, bool]] = []
+        for r in rects:
+            while stack and stack[-1][0] >= r["depth"]:
+                stack.pop()
+            off_x, off_y = (stack[-1][5], stack[-1][6]) if stack else (0.0, 0.0)
+            clipped = any(
+                r["x"] - a[5] >= a[1] + a[3]
+                or r["x"] - a[5] + r["w"] <= a[1]
+                or r["y"] - a[6] >= a[2] + a[4]
+                or r["y"] - a[6] + r["h"] <= a[2]
+                for a in stack
+            )
+            if r["kind"] == "scroll_view":
+                stack.append(
+                    [
+                        r["depth"],
+                        r["x"],
+                        r["y"],
+                        r["w"],
+                        r["h"],
+                        off_x + r.get("scroll_x", 0.0),
+                        off_y + r.get("scroll_y", 0.0),
+                    ]
+                )
+            geometry.append((r["x"] - off_x, r["y"] - off_y, clipped))
+        return geometry
 
     def _button_callbacks(self, root: Node) -> list[Callable[[], None] | None]:
         """Collect button callbacks in pre-order (same order as rects).
@@ -276,9 +373,6 @@ class TuiSurface:
 
         walk(root)
         return targets
-
-    def _focus_callbacks(self, root: Node) -> list[Callable[[], None] | None]:
-        return [node.on_click for node in self._focus_targets(root)]
 
     @staticmethod
     def _focus_rect_indices(root: Node) -> list[int]:

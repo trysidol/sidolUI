@@ -16,7 +16,6 @@ use ``DevServer`` explicitly when an HTML preview is useful.
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import queue
@@ -28,6 +27,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from sidol._reload import re_execute_module
 from sidol.app import App
 from sidol.surfaces.html import _html_template, _nest_by_depth
 
@@ -78,7 +78,7 @@ class DevServer:
         self._watch_paths: list[str] = (
             [watch] if isinstance(watch, str) else (watch or [])
         )
-        self._module = module  # the loaded module for importlib.reload()
+        self._module = module  # the loaded module, re-executed on hot-reload
 
         # One queue per SSE client so every connected browser receives every
         # update instead of competing for items from one shared queue.
@@ -230,16 +230,15 @@ class DevServer:
 
     @staticmethod
     def _file_hash(path: str) -> str:
-        """Return a short content hash for the file at *path*.
+        """Return an MD5 hex digest of the file's full contents.
 
-        Reads up to the first 64 KB (fast enough for typical app files)
-        and returns an MD5 hex digest. Empty or missing files return an
-        empty string.
+        The whole file is hashed — a partial hash would silently miss
+        changes below the cutoff. Missing/unreadable files return "".
         """
         import hashlib
         try:
             with open(path, "rb") as f:
-                data = f.read(65536)
+                data = f.read()
             return hashlib.md5(data).hexdigest()
         except OSError:
             return ""
@@ -247,10 +246,10 @@ class DevServer:
     def _hot_reload(self, changed_path: str) -> None:
         """Reload the app module and swap the internal ``App`` reference.
 
-        1. Calls ``importlib.reload(self._module)``.
+        1. Re-executes the module via ``re_execute_module``.
         2. Extracts the new ``app`` variable.
         3. Restores the old app's flush, swaps to the new app, hooks the new flush.
-        4. Drains stale SSE entries, rebuilds, and pushes the fresh body.
+        4. Rebuilds and pushes the fresh body to all SSE clients.
 
         All app mutation is done under ``_lock`` so HTTP handler threads
         never see a partially-swapped ``App``.
@@ -263,35 +262,11 @@ class DevServer:
             # this touches the old app, not our references).
             self._restore_flush()
 
-            # Re-execute the module using the original loader directly.
-            # importlib.reload() is unreliable for modules created via
-            # spec_from_file_location — it may clear __spec__ or fail
-            # to find the loader. The original spec.loader.exec_module()
-            # is stable and re-reads the source file every call.
-            spec = self._module.__spec__
-            if spec is None or spec.loader is None:
-                self._log(
-                    "Hot-reload: module has no usable loader, cannot reload",
-                    err=True,
-                )
-                self._rehook_flush()
-                return
-            # Clear bytecode cache for this module so exec_module re-reads
-            # the source file rather than using a stale .pyc.
-            if self._module.__spec__ is not None and self._module.__spec__.origin is not None:
-                cached = importlib.util.cache_from_source(self._module.__spec__.origin)
-                try:
-                    os.remove(cached)
-                except OSError:
-                    pass
-
-            importlib.invalidate_caches()
-            spec.loader.exec_module(self._module)
-            new_app: App | None = getattr(self._module, "app", None)
+            new_app: App | None = re_execute_module(self._module)
             if new_app is None:
                 self._log(
-                    "Hot-reload: no `app` variable in reloaded module — "
-                    "keeping old app",
+                    "Hot-reload: no usable loader or no `app` variable in "
+                    "reloaded module — keeping old app",
                     err=True,
                 )
                 self._rehook_flush()

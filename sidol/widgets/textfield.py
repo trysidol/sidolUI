@@ -28,7 +28,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from sidol.component import Component, State
-from sidol.events import FocusEvent
+from sidol.events import FocusEvent, KeyEvent
+from sidol.theme import get_theme
 from sidol.widgets import Row, Text
 
 
@@ -125,7 +126,8 @@ class TextField(Component):
             # Show cursor as a space when not focused
             marked = display[:pos] + " " + display[pos:]
 
-        label_part = Text(self.label, fg="#888888") if self.label else None
+        theme = get_theme()
+        label_part = Text(self.label, fg=theme.colors.muted) if self.label else None
 
         children = []
         if label_part is not None:
@@ -133,7 +135,7 @@ class TextField(Component):
         children.append(
             Text(
                 marked,
-                fg="#000000",
+                fg=theme.colors.text,
                 on_key=self._key_handlers(),
                 on_focus=self._handle_focus,
             )
@@ -142,17 +144,22 @@ class TextField(Component):
         return Row(*children, spacing=1)
 
     def _key_handlers(self) -> dict[str, Callable[..., object]]:
-        handlers: dict[str, Callable[..., object]] = {
+        return {
             "backspace": lambda event: self.backspace(),
             "delete": lambda event: self.delete(),
             "left": lambda event: self.move_left(),
             "right": lambda event: self.move_right(),
             "home": lambda event: self.move_home(),
             "end": lambda event: self.move_end(),
+            # Wildcard: any printable character without an explicit binding
+            # is inserted verbatim — case and symbols included. The surface
+            # only routes unmodified characters here (ctrl/alt combos skip
+            # the wildcard), so 'q' inserts text instead of quitting.
+            "*": self._insert_char,
         }
-        for char in "abcdefghijklmnopqrstuvwxyz0123456789 .,!?-_":
-            handlers[char] = lambda event, char=char: self.insert(char)
-        return handlers
+
+    def _insert_char(self, event: KeyEvent) -> None:
+        self.insert(event.key)
 
     def _handle_focus(self, event: FocusEvent) -> None:
         if event.kind == "focus":

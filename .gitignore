@@ -6,6 +6,7 @@ dist/
 
 # Rust
 target/
+/.freebuff
 
 # Maturin — compiled extension dropped here during `maturin develop`, not source
 sidol/_sidol_core*.pyd
@@ -15,3 +16,6 @@ sidol/_sidol_core*.pdb
 # Tool caches
 .pytest_cache/
 .ruff_cache/
+
+# Local editor/agent tooling (opencode plugins + node_modules)
+.opencode/

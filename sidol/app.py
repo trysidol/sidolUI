@@ -19,6 +19,16 @@ from sidol.node import Node
 class App:
     def __init__(self, root: Component) -> None:
         self.root = root
+        self._quit_requested = False
+
+    def request_quit(self) -> None:
+        """Ask the running surface to exit its event loop.
+
+        This is how app-level key bindings quit — e.g. a root container
+        with ``on_key={"q": lambda event: app.request_quit()}``. The TUI
+        surface checks the flag after every dispatched event.
+        """
+        self._quit_requested = True
 
     def build_tree(self) -> Node:
         """Resolve the full declarative tree, recursively.

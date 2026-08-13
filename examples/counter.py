@@ -5,7 +5,9 @@ Run it in a terminal:
     uv run maturin develop
     uv run sidol dev examples/counter.py
 
-Focus the buttons with Tab, activate with Enter/Space, and quit with 'q'.
+Focus the buttons with Tab, activate with Enter/Space, and quit with 'q'
+or Ctrl+C. The 'q' binding lives on the root Column — app-level key
+bindings are app policy, not engine built-ins.
 """
 
 from sidol import App, Component, State
@@ -32,6 +34,7 @@ class Counter(Component):
                 Button("-", on_click=self.decrement),
                 Button("+", on_click=self.increment),
             ),
+            on_key={"q": lambda event: app.request_quit()},
         )
 
 
