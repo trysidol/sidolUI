@@ -2043,6 +2043,37 @@ def test_tui_cleanup_runs_when_rendering_raises(monkeypatch) -> None:
     assert cleanup_calls == [1]
 
 
+def test_tui_loop_survives_view_error(monkeypatch, capsys) -> None:
+    """A broken view() must not kill the loop — it logs, keeps the last good
+    frame, and continues until quit (so a developer can hot-reload a fix)."""
+    import sidol.surfaces.tui as tui_module
+    from sidol.surfaces.tui import TuiSurface
+
+    class Boom(Component):
+        def view(self) -> Node:
+            raise RuntimeError("boom")
+
+    init_calls: list[int] = []
+    cleanup_calls: list[int] = []
+    events = iter([_key_event("c", ctrl=True)])
+
+    app = App(Boom())
+    monkeypatch.setattr(tui_module, "tui_init", lambda: init_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_cleanup", lambda: cleanup_calls.append(1))
+    monkeypatch.setattr(tui_module, "tui_size", lambda: (80, 24))
+    monkeypatch.setattr(tui_module, "tui_wait_event", lambda: next(events))
+
+    def broken_build_tree() -> Node:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app, "build_tree", broken_build_tree)
+
+    TuiSurface(app).run()
+    assert init_calls == [1]
+    assert cleanup_calls == [1]
+    assert "render failed" in capsys.readouterr().err
+
+
 def test_tui_hot_reload_swaps_app_on_file_change(monkeypatch, tmp_path) -> None:
     import sidol.surfaces.tui as tui_module
     from sidol.surfaces.tui import TuiSurface
@@ -2354,6 +2385,25 @@ def test_root_on_key_fallback_and_request_quit() -> None:
     assert app2._quit_requested is False
 
 
+def test_focusable_flag_controls_container_focus() -> None:
+    """``on_key`` alone is an app-level fallback, not focus; an explicit
+    ``focusable=True`` opts a container into Tab focus."""
+    from sidol.surfaces.tui import TuiSurface
+    from sidol.widgets import Button, Column
+
+    surface = TuiSurface(None)  # type: ignore[arg-type]
+
+    plain = Column(Button("x", on_click=lambda: None), on_key={"q": lambda e: None})
+    assert [n.kind for n in surface._focus_targets(plain)] == ["button"]
+
+    marked = Column(
+        Button("x", on_click=lambda: None),
+        on_key={"q": lambda e: None},
+        focusable=True,
+    )
+    assert [n.kind for n in surface._focus_targets(marked)] == ["column", "button"]
+
+
 def test_normalise_key_preserves_single_char_case() -> None:
     from sidol.events import normalise_key
 
@@ -2557,6 +2607,45 @@ def test_pump_workers_reports_errors(capsys) -> None:
         time.sleep(0.01)
     assert pump_workers() == 1
     assert "nope" in capsys.readouterr().err
+
+
+def test_pump_workers_collects_worker_dropped_after_completion() -> None:
+    """Regression: a Worker's completion callback must still fire when the
+    caller drops its reference before pump_workers() runs. The registry is
+    a strong set — the worker stays alive until collected."""
+    import gc
+    import time
+
+    from sidol.concurrency import Worker, pump_workers
+
+    done: list[str] = []
+    worker = Worker(lambda: "result", on_done=lambda r: done.append(r))
+    worker.start()
+    while not worker.poll():
+        time.sleep(0.01)
+    # Simulate abandonment after the thread has finished; under a WeakSet
+    # registry this would be garbage-collected before the next pump.
+    del worker
+    gc.collect()
+    assert pump_workers() == 1
+    assert done == ["result"]
+
+
+def test_pump_workers_swallows_systemexit(capsys) -> None:
+    """A worker raising SystemExit/KeyboardInterrupt must not kill the loop."""
+    import time
+
+    from sidol.concurrency import Worker, pump_workers
+
+    def boom() -> None:
+        raise SystemExit(1)
+
+    worker = Worker(boom)
+    worker.start()
+    while not worker.poll():
+        time.sleep(0.01)
+    assert pump_workers() == 1
+    assert "1" in capsys.readouterr().err
 
 
 def test_layout_snapshot_materialises_dicts() -> None:
