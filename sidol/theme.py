@@ -57,7 +57,7 @@ class Style:
     """Per-widget override. None = inherit from Theme."""
 
     variant: Literal["filled", "outline", "ghost"] | None = None
-    color: str | None = None
+    fg: str | None = None
     bg: str | None = None
     radius: int | None = None
 
@@ -86,13 +86,13 @@ def resolve_style(
     """Resolve a per-widget ``Style`` against ``theme``.
 
     Precedence is: explicit style value, then the widget's default, then the
-    theme fallback. Returns concrete values for ``color``, ``bg``,
+    theme fallback. Returns concrete values for ``fg``, ``bg``,
     ``variant``, ``radius``, and ``font_size``.
     """
     return {
-        "color": (
-            style.color
-            if style and style.color is not None
+        "fg": (
+            style.fg
+            if style and style.fg is not None
             else (default_fg or theme.colors.text)
         ),
         "bg": (

@@ -31,13 +31,15 @@ def Text(
             "content": content,
             "size": size if size is not None else theme.typography.size,
             "weight": weight,
-            "fg": fg or resolved["color"],
+            "fg": fg or resolved["fg"],
             "bg": bg or resolved["bg"],
             "variant": "",
             "radius": resolved["radius"],
         },
         on_key=on_key,
         on_focus=on_focus,
+        role="text",
+        name=content,
     )
 
 
@@ -66,7 +68,7 @@ def Button(
         props={
             "label": label,
             "disabled": disabled,
-            "fg": fg or resolved["color"],
+            "fg": fg or resolved["fg"],
             "bg": bg or resolved["bg"],
             "variant": resolved["variant"],
             "radius": resolved["radius"],
@@ -74,4 +76,6 @@ def Button(
         on_click=on_click,
         on_key=on_key,
         on_focus=on_focus,
+        role="button",
+        name=label,
     )

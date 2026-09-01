@@ -130,4 +130,5 @@ class Slider(Component):
             Text(f"[{bar}]", fg=fg),
             on_key=self._key_handlers(),
             on_focus=self._handle_focus,
+            role="slider",
         )

@@ -141,7 +141,7 @@ class TextField(Component):
             )
         )
 
-        return Row(*children, spacing=1)
+        return Row(*children, spacing=1, role="textbox", name=self.label or None)
 
     def _key_handlers(self) -> dict[str, Callable[..., object]]:
         return {

@@ -158,6 +158,8 @@ class Dropdown(Component):
                 spacing=1,
                 on_key=self._key_handlers(),
                 on_focus=self._handle_focus,
+                role="combobox",
+                name=self._label or None,
             )
 
         # Windowed option list — the highlight stays visible when the
@@ -182,4 +184,6 @@ class Dropdown(Component):
             *parts,
             on_key=self._key_handlers(),
             on_focus=self._handle_focus,
+            role="combobox",
+            name=self._label or None,
         )
