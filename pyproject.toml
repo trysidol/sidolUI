@@ -42,6 +42,9 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest 9 defaults to importlib import mode (no sys.path insertion), so
+# tests/_helpers.py needs an explicit path to be importable as `_helpers`.
+pythonpath = ["tests"]
 
 [tool.ruff]
 line-length = 100
