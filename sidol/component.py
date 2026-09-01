@@ -13,7 +13,7 @@ Architecture
 
 Auto-tracking in detail
   1. rendered_view() pushes the component's view_signal_id onto the
-     global _observer_stack, then calls view().
+     thread-local _observer_stack, then calls view().
   2. State.__get__ sees the non-empty stack and calls
      _graph.add_dependency(count_signal_id, view_signal_id).
   3. When self.count = 5 fires later, State.__set__ calls
@@ -30,6 +30,7 @@ Stale conditional subscriptions
 
 from __future__ import annotations
 
+import threading
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -41,11 +42,44 @@ from sidol._sidol_core import Graph
 # revisit when multi-window scenarios are real.
 _graph = Graph()
 
-# Stack of computation signal IDs currently in progress. Non-empty during
-# rendered_view(). Stack (not single slot) because tracked computations
-# can nest — a helper called from view() should attribute deps to the
-# outer computation, not create a new one.
-_observer_stack: list[int] = []
+
+class _ObserverStack(threading.local):
+    """Per-thread stack of computation signal IDs currently in progress.
+
+    Only the main thread renders (surfaces, flush(), build_tree() all run
+    there), so a State read from any other thread sees an empty stack and
+    registers no dependency — a background read must never wire an edge to
+    a computation it is not part of. Stack (not single slot) because
+    tracked computations can nest — a helper called from view() should
+    attribute deps to the outer computation, not create a new one.
+    """
+
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+    # List-like facade: the module-level name keeps working as the stack
+    # itself, so the push/pop/read sites below (and tests that poke the
+    # stack directly) are unchanged.
+    def append(self, item: int) -> None:
+        self.items.append(item)
+
+    def pop(self) -> int:
+        return self.items.pop()
+
+    def clear(self) -> None:
+        self.items.clear()
+
+    def __bool__(self) -> bool:
+        return bool(self.items)
+
+    def __getitem__(self, index: int) -> int:
+        return self.items[index]
+
+    def __eq__(self, other: object) -> bool:
+        return self.items == other
+
+
+_observer_stack = _ObserverStack()
 
 # Reverse map: computation signal ID -> Component instance.
 # WeakValueDictionary so orphaned components are collected.
@@ -160,6 +194,12 @@ class Component:
 
             def view(self):
                 return Text(self.title)
+
+    A Component instance occupies exactly one position in the component
+    tree — embedding the same instance under two parents raises on build
+    (the incremental frame path cannot keep a multi-position instance
+    coherent). Create separate instances, or use ``keyed()`` for repeated
+    items in a List.
     """
 
     def __init__(self) -> None:
@@ -173,6 +213,18 @@ class Component:
         # View computation signal — dirty means view() output is stale.
         self._view_signal_id = _graph.create_signal()
         _computations[self._view_signal_id] = self
+        # Render caches, managed by App's tree resolution (see app.py).
+        # _cached_view: raw output of the last successful rendered_view().
+        # _cached_resolved: resolved subtree last built from it by App.
+        # _splice_pending: the resolved subtree is stale (this component
+        # re-rendered, or a descendant did) and must be re-spliced before
+        # reuse. _tree_parent: the component that owned this one during the
+        # last resolution walk (None when unmounted) — it lets a re-render
+        # flag the ancestors that embed its subtree.
+        self._cached_view: Any = None
+        self._cached_resolved: Any = None
+        self._splice_pending = False
+        self._tree_parent: Component | None = None
         # Lifecycle state: True once dispose() has run.
         self._disposed = False
 
@@ -206,6 +258,13 @@ class Component:
             child.dispose()
         self._keyed_children.clear()
         self._active_keyed_children.clear()
+        # Drop render caches: the resolved subtree references child nodes
+        # that must not outlive disposal, and a disposed component must
+        # never be spliced into a tree again.
+        self._cached_view = None
+        self._cached_resolved = None
+        self._splice_pending = False
+        self._tree_parent = None
 
     def __del__(self) -> None:
         """Release this component's graph nodes when it is no longer used.
@@ -263,12 +322,19 @@ class Component:
         This is what the render loop calls. Never call view() directly — you
         lose auto-tracking and stale-edge cleanup.
 
-        Does two things:
+        Does three things:
           1. clear_observer removes all existing dependency edges for this
              component's view signal (prevents stale conditional subscriptions).
           2. _tracking pushes view_signal_id onto the observer stack so
              State reads during view() auto-register as dependencies.
+          3. The raw output is cached on the component so the incremental
+             frame path (App.build_tree with a dirty set) can splice clean
+             subtrees without calling view() again. Only a successful view()
+             updates the cache — a failed one keeps the previous output,
+             keeping the (raw, resolved) cache pair consistent.
         """
         _graph.clear_observer(self._view_signal_id)
         with _tracking(self._view_signal_id):
-            return self.view()
+            result = self.view()
+        self._cached_view = result
+        return result

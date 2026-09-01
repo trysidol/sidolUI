@@ -10,6 +10,11 @@ nodes). Slots also prevent accidental typos from creating new attributes.
 `key` identifies a Node snapshot. Stateful Components use
 ``Component.keyed(key)`` for stable identity during parent re-renders.
 
+`role`/`name` carry ARIA-style accessibility semantics on the shared
+model. They are Python-side only — the Rust engine never reads them —
+and are surfaced headlessly via ``App.semantic_tree()`` (no platform
+bridge in Phase 1).
+
 Children can be a mix of Node and Component references. When the App
 resolves the tree (``build_tree``), each Component child is replaced
 with its ``rendered_view()`` output, recursively.
@@ -63,6 +68,11 @@ class Node:
     on_focus: Callable[..., Any] | None = None
     focusable: bool = False
     key: str | int | None = None
+    # Accessibility semantics — typed fields on the shared model, not
+    # props-dict conventions. Never read by the Rust engine (py_node_to_layout
+    # extracts kind/props/children only); consumed by App.semantic_tree().
+    role: str | None = None
+    name: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.props, FrozenDict):
