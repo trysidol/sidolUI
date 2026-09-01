@@ -1,0 +1,15 @@
+{
+  "recorded_at": "2026-08-31T09:29:22+00:00",
+  "build_profile": "unknown",
+  "metrics": {
+    "build_tree (500 items)": 23.17248600000312,
+    "compute_layout (800x600)": 53.82548499997938,
+    "build_tree + compute_layout": 53.321302000040305,
+    "mutate + flush (1 signal)": 0.0010029999975813553,
+    "mutate all + flush (500 signals)": 0.3898200000548968,
+    "mutate + frame (1 signal)": 1.034752000014123,
+    "view calls: full build_tree": 500.0,
+    "view calls: frame (1 signal)": 1.0,
+    "graph: 1000-chain mark_dirty x50": 19.281123999971896
+  }
+}
