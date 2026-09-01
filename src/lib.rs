@@ -146,11 +146,12 @@ impl PyLayoutSnapshot {
         self.entries.len()
     }
 
-    /// Hit-test a click at cell (x, y) against the topmost enabled button.
-    /// Returns the 0-based button index (matching the surface's
-    /// `_button_callbacks` ordering) or `None`.
-    fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
-        render::hit_test(&self.entries, x, y)
+    /// Hit-test a click at cell (x, y). Returns `(rect_index, kind)` for
+    /// the topmost visible rect — the index into the snapshot's rect list
+    /// plus the rect's kind — or `None`. The surface maps rect indices to
+    /// callbacks; the engine does not filter by kind.
+    fn hit_test(&self, x: f32, y: f32) -> Option<(usize, &'static str)> {
+        render::hit_test(&self.entries, x, y).map(|(i, kind)| (i, kind.as_str()))
     }
 }
 
@@ -158,20 +159,14 @@ fn entries_to_dicts(py: Python<'_>, entries: &[layout::LayoutEntry]) -> PyResult
     let results = PyList::empty(py);
     for entry in entries {
         let rect = PyDict::new(py);
-        rect.set_item("kind", &entry.kind)?;
+        rect.set_item("kind", entry.kind.as_str())?;
         rect.set_item("x", entry.x)?;
         rect.set_item("y", entry.y)?;
         rect.set_item("w", entry.w)?;
         rect.set_item("h", entry.h)?;
         rect.set_item("depth", entry.depth)?;
         rect.set_item("text", &entry.text)?;
-        rect.set_item("fg", &entry.fg)?;
-        rect.set_item("bg", &entry.bg)?;
-        rect.set_item("variant", &entry.variant)?;
-        rect.set_item("disabled", entry.disabled)?;
-        rect.set_item("radius", entry.radius)?;
-        rect.set_item("scroll_x", entry.scroll_x)?;
-        rect.set_item("scroll_y", entry.scroll_y)?;
+        set_style_fields(&rect, &entry.style)?;
         results.append(rect)?;
     }
     Ok(results.into())
@@ -221,7 +216,7 @@ fn compute_layout_snapshot(
 
 /// Recursively convert a Python Node tree into a pure-Rust LayoutNode.
 fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
-    let kind: String = node.getattr("kind")?.extract()?;
+    let kind_str: String = node.getattr("kind")?.extract()?;
     let props_any = node.getattr("props")?;
     let props = props_any.cast::<PyDict>()?;
     let children_any = node.getattr("children")?;
@@ -229,29 +224,25 @@ fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
 
     let spacing = extract_prop_f32(props, "spacing", 0.0)?;
 
-    let text = match kind.as_str() {
-        "text" => extract_prop_str(props, "content", true)?,
-        "button" => extract_prop_str(props, "label", true)?,
-        "row" | "column" | "spacer" | "scroll_view" => String::new(),
-        _ => {
-            return Err(PyValueError::new_err(format!(
-                "unsupported node kind: {kind}"
-            )));
-        }
+    // Parsing IS validation: an unknown kind is rejected here at the FFI
+    // boundary and cannot exist downstream (LayoutNode carries the enum).
+    // Parsed after `spacing` so the error precedence is unchanged.
+    let kind: layout::NodeKind = kind_str.parse().map_err(PyValueError::new_err)?;
+    let text = match kind {
+        layout::NodeKind::Text => extract_prop_str(props, "content", true)?,
+        layout::NodeKind::Button => extract_prop_str(props, "label", true)?,
+        layout::NodeKind::Row
+        | layout::NodeKind::Column
+        | layout::NodeKind::Spacer
+        | layout::NodeKind::ScrollView => String::new(),
     };
-    let fg = extract_prop_str(props, "fg", false)?;
-    let bg = extract_prop_str(props, "bg", false)?;
-    let variant = extract_prop_str(props, "variant", false)?;
-    let disabled = extract_prop_bool(props, "disabled", false)?;
+    let style = extract_style(props)?;
 
     let min_w = extract_opt_f32(props, "min_w")?;
     let min_h = extract_opt_f32(props, "min_h")?;
     let max_w = extract_opt_f32(props, "max_w")?;
     let max_h = extract_opt_f32(props, "max_h")?;
     let padding = extract_prop_f32(props, "padding", 0.0)?;
-    let radius = extract_prop_f32(props, "radius", 0.0)?;
-    let scroll_x = extract_prop_f32(props, "scroll_x", 0.0)?;
-    let scroll_y = extract_prop_f32(props, "scroll_y", 0.0)?;
 
     let mut children = Vec::with_capacity(children_tuple.len());
     for child in children_tuple.iter() {
@@ -267,13 +258,7 @@ fn py_node_to_layout(node: &Bound<PyAny>) -> PyResult<layout::LayoutNode> {
         max_h,
         padding,
         text,
-        fg,
-        bg,
-        variant,
-        disabled,
-        radius,
-        scroll_x,
-        scroll_y,
+        style,
         children,
     })
 }
@@ -333,6 +318,42 @@ fn extract_prop_bool(props: &Bound<PyDict>, key: &str, default: bool) -> PyResul
     }
 }
 
+/// The style schema — the single per-property listing for `NodeStyle`.
+/// `extract_style` (props dict → struct) and `set_style_fields` (struct →
+/// rect dict) are both generated from this one table, so a new style
+/// property is one row here plus its field in `NodeStyle` (layout.rs).
+/// Forgetting the row is a missing-field compile error in `extract_style`,
+/// never a silently dropped dict key.
+macro_rules! node_style_schema {
+    ( $( $field:ident : $key:literal => $extract:ident($($arg:expr),*) ),* $(,)? ) => {
+        /// Extract the style payload from a Python props dict. Uses the
+        /// same `extract_prop_*` helpers (and therefore the same error
+        /// messages and defaults) as the per-property extraction it replaced.
+        fn extract_style(props: &Bound<PyDict>) -> PyResult<layout::NodeStyle> {
+            Ok(layout::NodeStyle {
+                $( $field: $extract(props, $key, $($arg),*)?, )*
+            })
+        }
+
+        /// Materialise the style payload into a Python rect dict — the
+        /// keys are the wire names Python reads (`to_dicts`, dev server).
+        fn set_style_fields(rect: &Bound<PyDict>, style: &layout::NodeStyle) -> PyResult<()> {
+            $( rect.set_item($key, style.$field.clone())?; )*
+            Ok(())
+        }
+    };
+}
+
+node_style_schema! {
+    fg: "fg" => extract_prop_str(false),
+    bg: "bg" => extract_prop_str(false),
+    variant: "variant" => extract_prop_str(false),
+    disabled: "disabled" => extract_prop_bool(false),
+    radius: "radius" => extract_prop_f32(0.0),
+    scroll_x: "scroll_x" => extract_prop_f32(0.0),
+    scroll_y: "scroll_y" => extract_prop_f32(0.0),
+}
+
 /// Convert one engine event to the Python dict protocol:
 ///   {"type": "tick"} / {"type": "resize"}
 ///   {"type": "key", "key": str, "ctrl": b, "alt": b, "shift": b}
@@ -385,11 +406,11 @@ fn tui_size() -> PyResult<(u16, u16)> {
 fn tui_render_frame(
     py: Python<'_>,
     snapshot: PyRef<'_, PyLayoutSnapshot>,
-    focused_idx: i32,
+    focused_rect: i32,
 ) -> PyResult<Py<PyAny>> {
     let entries = Arc::clone(&snapshot.entries);
     let event = py
-        .detach(move || render::render_frame(&entries, focused_idx))
+        .detach(move || render::render_frame(&entries, focused_rect))
         .map_err(PyRuntimeError::new_err)?;
     event_to_py(py, &event)
 }
