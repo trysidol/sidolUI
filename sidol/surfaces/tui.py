@@ -5,10 +5,11 @@ surface class. The ``TuiSurface`` owns the terminal lifecycle (init,
 render loop, cleanup), focus navigation, callback dispatch, and optional
 hot-reload when watching app source files.
 
-The loop is dirty-gated: it only rebuilds the tree, recomputes layout,
-and redraws when the reactive graph holds dirty signals, the terminal
-was resized, or the app was hot-reloaded. Idle frames block in
-``tui_wait_event`` — no rebuild, no layout, no paint.
+The loop is dirty-gated: it only re-renders dirty components (clean
+subtrees are spliced from cache), recomputes layout, and redraws when the
+reactive graph holds dirty signals, the terminal was resized, or the app
+was hot-reloaded. Idle frames block in ``tui_wait_event`` — no resolve,
+no layout, no paint.
 
 Surface policy (kept here, not in the engine):
   - Ctrl+C quits. Everything else is dispatched: focused widget first,
@@ -33,9 +34,9 @@ from sidol._sidol_core import (
     tui_size,
     tui_wait_event,
 )
-from sidol.app import App
+from sidol.app import App, _multiple_apps_allowed
 from sidol.component import _graph
-from sidol.concurrency import pump_workers
+from sidol.concurrency import cancel_all_workers, pump_workers
 from sidol.events import FocusEvent, KeyEvent, normalise_key
 from sidol.node import Node
 
@@ -72,39 +73,56 @@ class TuiSurface:
         try:
             focused_idx: int = -1  # index into the focus-target list, -1 = none
             need_render = True
+            full_rebuild = True  # first frame: no render caches exist yet
+            last_render_error: str | None = None  # repr of the last logged failure
             tree: Node | None = None
             snapshot = None
             targets: list[Node] = []
-            button_callbacks: list[Callable[[], None] | None] = []
+            button_callbacks: dict[int, Callable[[], None]] = {}
             focus_rects: list[int] = []
             while True:
                 if need_render:
                     viewport_w, viewport_h = tui_size()
-                    # Clear pre-render dirtiness first: build_tree() re-renders
-                    # every component, consuming all currently-dirty signals.
-                    # Writes made *during* a view() (side effects) mark new
-                    # dirtiness that survives to gate the next rebuild —
-                    # matching flush()'s defer-to-next-tick semantics rather
-                    # than being swallowed by a blanket clear after the render.
-                    _graph.clear_dirty()
+                    # Dirty ticks drain the reactive graph and scope the
+                    # rebuild to it: build_tree(dirty) re-renders only dirty
+                    # components and splices cached subtrees for clean ones.
+                    # A resize or hot-reload swap changes a global input
+                    # (viewport / component identity) and rebuilds fully —
+                    # that full pass is also what re-attempts previously
+                    # failed views on recovery ticks. Writes made *during*
+                    # a view() (side effects) mark new dirtiness that
+                    # survives this drain and gates the next rebuild —
+                    # matching flush()'s defer-to-next-tick semantics
+                    # rather than being swallowed by a blanket clear after
+                    # the render.
+                    dirty = None if full_rebuild else _graph.drain_dirty()
                     try:
-                        tree = self._app.build_tree()
+                        tree = self._app.build_tree(dirty)
                         snapshot = compute_layout_snapshot(
                             tree, float(viewport_w), float(viewport_h)
                         )
                     except Exception as exc:
                         # A broken view() must not kill the loop — report and
                         # keep the last good frame so the developer can fix the
-                        # code and hot-reload.
-                        print(
-                            f"[sidol] render failed: {exc}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
+                        # code and hot-reload. The failed render is retried on
+                        # every dirty/resize tick (~20/sec in raw mode, where
+                        # the developer can't see stderr), so log once per
+                        # failure STATE: reprint only when the error's
+                        # representation (type + message) changes.
+                        if repr(exc) != last_render_error:
+                            last_render_error = repr(exc)
+                            print(
+                                f"[sidol] render failed: {exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                         need_render = False
                         continue
+                    # Success — clear the tracker so a future identical
+                    # failure is logged again instead of being swallowed.
+                    last_render_error = None
                     targets = self._focus_targets(tree)
-                    button_callbacks = self._button_callbacks(tree)
+                    button_callbacks = self._button_callback_map(tree)
                     focus_rects = self._focus_rect_indices(tree)
                     rect_focused = (
                         focus_rects[focused_idx]
@@ -130,16 +148,16 @@ class TuiSurface:
                     new_app = self._maybe_reload()
                     if new_app is not None and new_app is not self._app:
                         self._app.dispose()
+                        cancel_all_workers()
                         self._app = new_app
                         focused_idx = -1
                         swapped = True
-                need_render = (
-                    swapped
-                    or event.get("type") == "resize"
-                    or bool(_graph.dirty_ids())
-                )
+                resized = event.get("type") == "resize"
+                need_render = swapped or resized or bool(_graph.dirty_ids())
+                full_rebuild = swapped or resized
         finally:
             self._app.dispose()
+            cancel_all_workers()
             tui_cleanup()
 
     # ------------------------------------------------------------------
@@ -166,7 +184,11 @@ class TuiSurface:
     def _reload(self, path: str) -> App | None:
         if self._reloader is None:
             return None
-        new_app = self._reloader(path)
+        # The reloader constructs the replacement App while this surface's
+        # app is still alive — the supported swap window (the old app is
+        # disposed right after), so the single-app warning is suppressed.
+        with _multiple_apps_allowed():
+            new_app = self._reloader(path)
         if new_app is not None and new_app is not self._app:
             print(
                 f"[sidol] reloaded after change to {os.path.basename(path)}",
@@ -180,7 +202,7 @@ class TuiSurface:
         event: dict,
         focused_idx: int,
         *,
-        button_callbacks: list[Callable[[], None] | None],
+        button_callbacks: dict[int, Callable[[], None]],
         targets: list[Node],
         snapshot,
         root: Node | None,
@@ -278,36 +300,49 @@ class TuiSurface:
         self,
         event: dict,
         snapshot,
-        button_callbacks: list[Callable[[], None] | None],
+        button_callbacks: dict[int, Callable[[], None]],
     ) -> None:
-        """Dispatch a mouse click to the topmost button under the cursor.
+        """Dispatch a mouse click via the snapshot's hit-test.
 
         Hit-testing runs in Rust on the layout snapshot, using the same
         scroll-clipping the renderer uses — so clicks land where content
-        is drawn, not where it was laid out. Returns the button index into
-        ``button_callbacks`` (pre-order among enabled buttons).
+        is drawn, not where it was laid out. It returns ``(rect_index,
+        kind)`` for the topmost visible rect; this surface acts only on
+        buttons, mapped from rect index by ``_button_callback_map``.
         """
-        idx = snapshot.hit_test(float(event["x"]), float(event["y"]))
-        if idx is not None and idx < len(button_callbacks):
-            cb = button_callbacks[idx]
+        hit = snapshot.hit_test(float(event["x"]), float(event["y"]))
+        if hit is None:
+            return
+        rect_index, kind = hit
+        if kind == "button":
+            cb = button_callbacks.get(rect_index)
             if cb is not None:
                 cb()
 
-    def _button_callbacks(self, root: Node) -> list[Callable[[], None] | None]:
-        """Collect button callbacks in pre-order (same order as rects).
+    def _button_callback_map(self, root: Node) -> dict[int, Callable[[], None]]:
+        """Map rect index -> on_click for enabled buttons with handlers.
 
-        Returns a list with one entry per button. Entries are None for
-        buttons without an ``on_click`` handler, so the list index
-        matches the button index in the rect list.
+        The engine's rect list is the resolved tree in pre-order (one
+        rect per Node), so walking the tree with the same counter as
+        ``_focus_rect_indices`` yields each button's actual rect index —
+        derived from rect data, not a parallel ordering the engine and
+        surface could drift apart on.
         """
-        callbacks: list[Callable[[], None] | None] = []
+        callbacks: dict[int, Callable[[], None]] = {}
+        rect_index = 0
 
         def walk(node: Node) -> None:
-            if node.kind == "button":
-                if not node.props.get("disabled", False):
-                    callbacks.append(node.on_click)
+            nonlocal rect_index
+            if (
+                node.kind == "button"
+                and not node.props.get("disabled", False)
+                and node.on_click is not None
+            ):
+                callbacks[rect_index] = node.on_click
+            rect_index += 1
             for child in node.children:
-                walk(child)
+                if isinstance(child, Node):
+                    walk(child)
 
         walk(root)
         return callbacks

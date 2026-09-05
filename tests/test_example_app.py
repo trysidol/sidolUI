@@ -59,4 +59,7 @@ def test_counter_example_runs_headless() -> None:
         app.flush()
         assert _collect_text(app.build_tree()) == ["Count: -1"]
     finally:
+        # Release the single-app claim even though the module's on_key
+        # lambda keeps the app in a reference cycle until gc runs.
+        app.dispose()
         reset_graph()

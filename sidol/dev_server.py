@@ -16,20 +16,18 @@ use ``DevServer`` explicitly when an HTML preview is useful.
 
 from __future__ import annotations
 
-import json
 import os
-import queue
 import signal
-import socketserver
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from sidol._dev_http import _Server, _SseHub, make_request_handler
 from sidol._reload import re_execute_module
-from sidol.app import App
-from sidol.surfaces.html import _html_template, _nest_by_depth
+from sidol.app import App, _multiple_apps_allowed
+from sidol.concurrency import cancel_all_workers
+from sidol.surfaces.html import _nest_by_depth
 
 # Default port — 7888 doesn't conflict with any major dev server:
 #   Vite 5173, Next 3000, Webpack 8080, CRA 3000, Angular 4200,
@@ -53,7 +51,9 @@ class DevServer:
     module — replacing the ``App`` instance without restarting the HTTP
     server. All connected browser tabs update automatically.
 
-    Hooks into ``App.flush()`` so every state change pushes to the browser.
+    Hooks into ``App.flush()`` via a post-flush listener
+    (``App.add_flush_listener``) so every state change pushes to the
+    browser.
     """
 
     def __init__(
@@ -69,7 +69,9 @@ class DevServer:
     ) -> None:
         self._app = app
         self._host = host
-        self._port = port or _DEFAULT_PORT
+        # port=0 means "pick an ephemeral port" (see _find_port); None
+        # falls back to the default.
+        self._port = _DEFAULT_PORT if port is None else port
         self._viewport_w = viewport_w
         self._viewport_h = viewport_h
         self._verbosity = verbosity
@@ -80,12 +82,11 @@ class DevServer:
         )
         self._module = module  # the loaded module, re-executed on hot-reload
 
-        # One queue per SSE client so every connected browser receives every
-        # update instead of competing for items from one shared queue.
-        self._client_queues: set[queue.Queue[str | None]] = set()
-        # Latest body HTML — guarded by lock.
+        # Published page state + one SSE queue per connected browser, guarded
+        # by the same lock that guards the app swap (topology unchanged from
+        # the pre-split monolith). See sidol/_dev_http.py.
         self._lock = threading.Lock()
-        self._latest_body = ""
+        self._hub = _SseHub(self._lock)
         # Whether the server is shutting down.
         self._shutdown = threading.Event()
         # The underlying HTTP server (set during run()).
@@ -93,9 +94,9 @@ class DevServer:
         # The actual port the server is listening on (set during run()).
         self._actual_port: int | None = None
 
-        # Hook into App.flush() so every state change auto-pushes.
-        self._orig_flush = app.flush
-        app.flush = self._flush_and_rebuild  # type: ignore[method-assign]
+        # Push updated HTML to browsers after every state change: a
+        # post-flush listener on the app (see App.add_flush_listener).
+        app.add_flush_listener(self.rebuild)
 
     # ------------------------------------------------------------------
     # Public API
@@ -104,14 +105,12 @@ class DevServer:
     def stop(self) -> None:
         """Signal the server to shut down. Safe to call multiple times."""
         self._shutdown.set()
-        with self._lock:
-            queues = tuple(self._client_queues)
-        for client_queue in queues:
-            client_queue.put(None)
+        self._hub.broadcast(None)
         if self._server:
             self._server.shutdown()
-        self._restore_flush()
+        self._app.remove_flush_listener(self.rebuild)
         self._app.dispose()
+        cancel_all_workers()
 
     @property
     def port(self) -> int | None:
@@ -119,14 +118,13 @@ class DevServer:
         return self._actual_port
 
     def rebuild(self) -> str:
-        """Recompute layout, generate HTML body, push to all SSE clients."""
+        """Recompute layout, generate HTML body, publish + push to SSE clients."""
         with self._lock:
             app = self._app
         rects = app.compute_layout(self._viewport_w, self._viewport_h)
         body = _nest_by_depth(rects)
-        with self._lock:
-            self._latest_body = body
-        self._broadcast(body)
+        self._hub.publish(body)
+        self._hub.broadcast(body)
         return body
 
     def run(self) -> None:
@@ -155,14 +153,14 @@ class DevServer:
             )
             sys.exit(1)
 
-        if port != self._port:
+        if self._port != 0 and port != self._port:
             self._log(f"Port {self._port} was in use, using port {port} instead.")
 
         self._actual_port = port
 
         self._server = _Server(
             (self._host, port),
-            _make_handler(self),
+            make_request_handler(self),
         )
 
         url = f"http://{self._host}:{port}"
@@ -193,10 +191,11 @@ class DevServer:
                 signal.signal(signal.SIGINT, original_sigint)
             if original_sigterm is not None:
                 signal.signal(signal.SIGTERM, original_sigterm)
-            self._broadcast(None)
+            self._hub.broadcast(None)
             if self._server:
                 self._server.server_close()
-            self._restore_flush()
+            self._app.remove_flush_listener(self.rebuild)
+            cancel_all_workers()
             self._app.dispose()
 
     # ------------------------------------------------------------------
@@ -250,7 +249,8 @@ class DevServer:
 
         1. Re-executes the module via ``re_execute_module``.
         2. Extracts the new ``app`` variable.
-        3. Restores the old app's flush, swaps to the new app, hooks the new flush.
+        3. Disposes the old app, swaps to the new app, attaches the
+           post-flush listener to it.
         4. Rebuilds and pushes the fresh body to all SSE clients.
 
         All app mutation is done under ``_lock`` so HTTP handler threads
@@ -260,26 +260,26 @@ class DevServer:
             return
 
         try:
-            # Restore the old app's flush before reloading (no lock needed —
-            # this touches the old app, not our references).
-            self._restore_flush()
-
-            new_app: App | None = re_execute_module(self._module)
+            # The re-executed module constructs the replacement App while
+            # the old one is still alive — the supported swap window (the
+            # old app is disposed right after), so the single-app warning
+            # is suppressed.
+            with _multiple_apps_allowed():
+                new_app: App | None = re_execute_module(self._module)
             if new_app is None:
                 self._log(
                     "Hot-reload: no usable loader or no `app` variable in "
                     "reloaded module — keeping old app",
                     err=True,
                 )
-                self._rehook_flush()
                 return
 
             # Swap app references under the lock so handler threads are safe.
             with self._lock:
                 self._app.dispose()
+                cancel_all_workers()
                 self._app = new_app
-                self._orig_flush = new_app.flush
-                new_app.flush = self._flush_and_rebuild  # type: ignore[method-assign]
+                new_app.add_flush_listener(self.rebuild)
 
             # Rebuild and push.
             self.rebuild()
@@ -287,52 +287,23 @@ class DevServer:
 
         except Exception as exc:
             self._log(f"Hot-reload failed: {exc}", err=True)
-            try:
-                self._rehook_flush()
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _flush_and_rebuild(self) -> None:
-        """Call the original flush, then rebuild and push to browser."""
-        self._orig_flush()
-        self.rebuild()
-
-    def _restore_flush(self) -> None:
-        """Restore the original ``App.flush()``, undoing the hook."""
-        try:
-            self._app.flush = self._orig_flush  # type: ignore[method-assign]
-        except Exception:
-            pass
-
-    def _rehook_flush(self) -> None:
-        """Re-install the flush hook on ``self._app``."""
-        with self._lock:
-            self._orig_flush = self._app.flush
-            self._app.flush = self._flush_and_rebuild  # type: ignore[method-assign]
-
-    def _register_client(self) -> queue.Queue[str | None]:
-        client_queue: queue.Queue[str | None] = queue.Queue()
-        with self._lock:
-            self._client_queues.add(client_queue)
-        return client_queue
-
-    def _unregister_client(self, client_queue: queue.Queue[str | None]) -> None:
-        with self._lock:
-            self._client_queues.discard(client_queue)
-
-    def _broadcast(self, item: str | None) -> None:
-        with self._lock:
-            queues = tuple(self._client_queues)
-        for client_queue in queues:
-            client_queue.put(item)
-
     def _find_port(self) -> int | None:
-        """Find an available port starting from ``self._port``."""
+        """Find an available port starting from ``self._port``.
+
+        A requested port of 0 asks the OS for an ephemeral port: bind
+        once with port 0, read back the assigned port, and return it.
+        """
         import socket
+
+        if self._port == 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((self._host, 0))
+                return s.getsockname()[1]
 
         for offset in range(_MAX_PORT_ATTEMPTS):
             candidate = self._port + offset
@@ -354,150 +325,6 @@ class DevServer:
             return
         ts = time.strftime("%H:%M:%S")
         print(f"  [{ts}] {message}", file=sys.stderr, flush=True)
-
-
-# ---------------------------------------------------------------------------
-# Threaded HTTP server
-# ---------------------------------------------------------------------------
-
-
-class _Server(socketserver.ThreadingMixIn, HTTPServer):
-    """Threaded HTTP server — one thread per connection.
-
-    ``ThreadingMixIn`` must come before ``HTTPServer`` in the MRO for
-    proper ``socketserver`` initialisation.
-    """
-
-    allow_reuse_address = True
-    daemon_threads = True
-    block_on_close = False
-
-
-def _make_handler(server: DevServer) -> type[BaseHTTPRequestHandler]:
-    """Create a per-instance request handler class."""
-
-    class DevRequestHandler(BaseHTTPRequestHandler):
-        def log_message(self, format: str, *args: Any) -> None:
-            if server._verbosity > 1:
-                super().log_message(format, *args)
-
-        # ------------------------------------------------------------------
-        # Routing
-        # ------------------------------------------------------------------
-
-        def do_GET(self) -> None:
-            try:
-                if self.path == "/":
-                    self._serve_page()
-                elif self.path == "/events":
-                    self._serve_sse()
-                elif self.path == "/state":
-                    self._serve_state()
-                elif self.path == "/health":
-                    self._serve_health()
-                else:
-                    self.send_response(404)
-                    self.send_header("Content-Type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(b"404 Not Found")
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        # ------------------------------------------------------------------
-        # GET /  —  Full HTML page with embedded SSE JS
-        # ------------------------------------------------------------------
-
-        def _serve_page(self) -> None:
-            with server._lock:
-                body = server._latest_body
-            html = _html_template(
-                server._viewport_w,
-                server._viewport_h,
-                body,
-                live_reload=True,
-                sse_url="/events",
-            )
-            raw = html.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.end_headers()
-            self.wfile.write(raw)
-
-        # ------------------------------------------------------------------
-        # GET /events  —  Server-Sent Events stream
-        # ------------------------------------------------------------------
-
-        def _serve_sse(self) -> None:
-            server._log("Browser connected (SSE)")
-            client_queue = server._register_client()
-            try:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
-                self.send_header("X-Accel-Buffering", "no")
-                self.end_headers()
-
-                with server._lock:
-                    initial = server._latest_body
-                if initial:
-                    _sse_write(self.wfile, initial)
-
-                while not server._shutdown.is_set():
-                    try:
-                        item = client_queue.get(timeout=1.0)
-                    except queue.Empty:
-                        continue
-                    if item is None:
-                        break
-                    _sse_write(self.wfile, item)
-            finally:
-                server._unregister_client(client_queue)
-            server._log("Browser disconnected (SSE)")
-
-        # ------------------------------------------------------------------
-        # GET /state  —  Layout rects as JSON
-        # ------------------------------------------------------------------
-
-        def _serve_state(self) -> None:
-            with server._lock:
-                app = server._app
-            rects = app.compute_layout(
-                server._viewport_w, server._viewport_h
-            )
-            payload = json.dumps(rects, indent=2).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(payload)
-
-        # ------------------------------------------------------------------
-        # GET /health  —  Health check
-        # ------------------------------------------------------------------
-
-        def _serve_health(self) -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok"}')
-
-    return DevRequestHandler
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _sse_write(wfile: Any, data: str) -> None:
-    """Write one SSE ``data:`` frame, splitting newlines across lines."""
-    for line in data.split("\n"):
-        wfile.write(f"data:{line}\n".encode())
-    wfile.write(b"\n\n")
-    wfile.flush()
 
 
 def _try_open_browser(url: str) -> None:

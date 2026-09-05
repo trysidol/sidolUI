@@ -317,4 +317,263 @@ mod tests {
         assert!(ids.contains(&a));
         assert!(graph.dirty_ids().is_empty());
     }
+
+    // ------------------------------------------------------------------
+    // Property tests — the invariants above, checked against naive
+    // oracles over randomly generated graphs and operation sequences.
+    // 256 cases per property (proptest default). Operations go through
+    // the public API only; ids are 0..n because create_signal allocates
+    // sequentially.
+    // ------------------------------------------------------------------
+
+    use proptest::prelude::*;
+    use std::cmp::Ordering;
+    use std::collections::BTreeSet;
+
+    /// Normalize raw random pairs into a deduplicated, strictly
+    /// lower→higher edge set — a random DAG by construction.
+    fn normalize_edges(raw: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+        let mut edges: Vec<(usize, usize)> = Vec::new();
+        for (a, b) in raw {
+            if a < b && !edges.contains(&(a, b)) {
+                edges.push((a, b));
+            }
+        }
+        edges
+    }
+
+    /// Drop duplicate entries, keeping first occurrence order.
+    fn dedupe(items: Vec<usize>) -> Vec<usize> {
+        let mut seen = HashSet::new();
+        items
+            .into_iter()
+            .filter(|item| seen.insert(*item))
+            .collect()
+    }
+
+    /// Build a graph with `n` signals (ids 0..n) and the given edges.
+    fn build_graph(n: usize, edges: &[(usize, usize)]) -> Graph {
+        let mut graph = Graph::new();
+        for _ in 0..n {
+            graph.create_signal();
+        }
+        for &(a, b) in edges {
+            graph.add_dependency(SignalId::from_raw(a), SignalId::from_raw(b));
+        }
+        graph
+    }
+
+    /// Naive reachability over the raw edge list — the propagation
+    /// oracle. Deliberately dumb: rescan every edge per step, no
+    /// adjacency structure, no visited/dirty distinction to get wrong.
+    fn reachable_from(edges: &[(usize, usize)], root: usize) -> BTreeSet<usize> {
+        let mut reached = BTreeSet::new();
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            if reached.insert(current) {
+                for &(a, b) in edges {
+                    if a == current {
+                        stack.push(b);
+                    }
+                }
+            }
+        }
+        reached
+    }
+
+    /// Naive reference model — the documented semantics transcribed
+    /// directly: plain adjacency sets, a persistent dirty set, a
+    /// per-mark local visited set. One subtlety is deliberate: dirty
+    /// PERSISTS across clear_observer (clearing subscriptions does not
+    /// un-mark an already-dirty signal), so recomputing reachability at
+    /// drain time would encode the wrong spec.
+    #[derive(Default)]
+    struct ReferenceGraph {
+        dependents: Vec<HashSet<usize>>,
+        sources: Vec<HashSet<usize>>,
+        dirty: HashSet<usize>,
+    }
+
+    impl ReferenceGraph {
+        fn add_node(&mut self) {
+            self.dependents.push(HashSet::new());
+            self.sources.push(HashSet::new());
+        }
+
+        fn add_dependency(&mut self, source: usize, dependent: usize) {
+            self.dependents[source].insert(dependent);
+            self.sources[dependent].insert(source);
+        }
+
+        fn clear_observer(&mut self, observer: usize) {
+            for source in self.sources[observer].clone() {
+                self.dependents[source].remove(&observer);
+            }
+            self.sources[observer].clear();
+        }
+
+        fn mark_dirty(&mut self, id: usize) {
+            let mut stack = vec![id];
+            let mut visited = HashSet::new();
+            while let Some(current) = stack.pop() {
+                if visited.insert(current) {
+                    self.dirty.insert(current);
+                    stack.extend(self.dependents[current].iter().copied());
+                }
+            }
+        }
+
+        fn drain(&mut self) -> BTreeSet<usize> {
+            let drained = self.dirty.iter().copied().collect();
+            self.dirty.clear();
+            drained
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        AddEdge(usize, usize),
+        MarkDirty(usize),
+        Drain,
+        ClearObserver(usize),
+    }
+
+    proptest! {
+        // Property 1 — drain ≡ transitive dependents: marking one signal
+        // and draining yields exactly the nodes reachable from it
+        // (itself included), and drain leaves nothing behind.
+        #[test]
+        fn prop_drain_equals_transitive_dependents(
+            (n, edges, root) in (1usize..=24).prop_flat_map(|n| {
+                (
+                    Just(n),
+                    prop::collection::vec((0..n, 0..n), 0..=96).prop_map(normalize_edges),
+                    0..n,
+                )
+            })
+        ) {
+            let mut graph = build_graph(n, &edges);
+            graph.mark_dirty(SignalId::from_raw(root));
+
+            let drained: BTreeSet<usize> =
+                graph.drain_dirty().into_iter().map(|id| id.raw()).collect();
+            prop_assert_eq!(drained, reachable_from(&edges, root));
+            prop_assert!(graph.dirty_ids().is_empty());
+        }
+
+        // Property 2 — clear_observer leaves no stale edges: after a
+        // clear, the observer is dirtied by no upstream write, however
+        // many writes and further clears follow. (A direct mark on the
+        // observer itself legitimately dirties it — that is a write,
+        // not a stale edge.)
+        #[test]
+        fn prop_clear_observer_leaves_no_stale_edges(
+            (n, edges, observers, writes) in (1usize..=24).prop_flat_map(|n| {
+                (
+                    Just(n),
+                    prop::collection::vec((0..n, 0..n), 0..=96).prop_map(normalize_edges),
+                    prop::collection::vec(0usize..n, 0..=6).prop_map(dedupe),
+                    prop::collection::vec(0usize..n, 1..=32),
+                )
+            })
+        ) {
+            let mut graph = build_graph(n, &edges);
+            let mut cleared: HashSet<usize> = HashSet::new();
+            let mut next_clear = 0;
+
+            for &write in &writes {
+                // Interleave clears with writes so every write runs under
+                // the subscription state left by all clears so far.
+                if next_clear < observers.len() {
+                    let observer = observers[next_clear];
+                    graph.clear_observer(SignalId::from_raw(observer));
+                    cleared.insert(observer);
+                    next_clear += 1;
+                }
+
+                graph.mark_dirty(SignalId::from_raw(write));
+                let drained: BTreeSet<usize> =
+                    graph.drain_dirty().into_iter().map(|id| id.raw()).collect();
+
+                for &observer in &cleared {
+                    if write != observer {
+                        prop_assert!(
+                            !drained.contains(&observer),
+                            "cleared observer {} was dirtied by a write to {}",
+                            observer,
+                            write
+                        );
+                    }
+                }
+            }
+        }
+
+        // Property 3 — reference-model equivalence: a random operation
+        // sequence applied to both the real graph and the naive model
+        // must produce identical drained sets at every drain. This
+        // subsumes Properties 1 and 2 (single-mark propagation and
+        // clear-then-write are both op-sequence special cases) but both
+        // are kept: they are sharper, cheaper, and fail with better
+        // messages.
+        #[test]
+        fn prop_reference_model_equivalence(
+            (n, ops) in (1usize..=16).prop_flat_map(|n| {
+                // AddEdge needs two distinct endpoints; with n == 1 none
+                // exist, so the arm is dropped rather than filtered away
+                // (a filter that always rejects aborts generation). The
+                // a == b collision folds to a fixed valid edge — the
+                // generator never rejects.
+                let op: BoxedStrategy<Op> = if n >= 2 {
+                    prop_oneof![
+                        3 => (0..n, 0..n).prop_map(|(a, b)| match a.cmp(&b) {
+                            Ordering::Less => Op::AddEdge(a, b),
+                            Ordering::Greater => Op::AddEdge(b, a),
+                            Ordering::Equal => Op::AddEdge(0, 1),
+                        }),
+                        4 => (0..n).prop_map(Op::MarkDirty),
+                        2 => Just(Op::Drain),
+                        2 => (0..n).prop_map(Op::ClearObserver),
+                    ]
+                    .boxed()
+                } else {
+                    prop_oneof![
+                        4 => (0..n).prop_map(Op::MarkDirty),
+                        2 => Just(Op::Drain),
+                        2 => (0..n).prop_map(Op::ClearObserver),
+                    ]
+                    .boxed()
+                };
+                (Just(n), prop::collection::vec(op, 0..=64))
+            })
+        ) {
+            let mut graph = Graph::new();
+            let mut model = ReferenceGraph::default();
+            for _ in 0..n {
+                graph.create_signal();
+                model.add_node();
+            }
+
+            for op in ops {
+                match op {
+                    Op::AddEdge(a, b) => {
+                        graph.add_dependency(SignalId::from_raw(a), SignalId::from_raw(b));
+                        model.add_dependency(a, b);
+                    }
+                    Op::MarkDirty(x) => {
+                        graph.mark_dirty(SignalId::from_raw(x));
+                        model.mark_dirty(x);
+                    }
+                    Op::Drain => {
+                        let real: BTreeSet<usize> =
+                            graph.drain_dirty().into_iter().map(|id| id.raw()).collect();
+                        prop_assert_eq!(real, model.drain());
+                    }
+                    Op::ClearObserver(o) => {
+                        graph.clear_observer(SignalId::from_raw(o));
+                        model.clear_observer(o);
+                    }
+                }
+            }
+        }
+    }
 }

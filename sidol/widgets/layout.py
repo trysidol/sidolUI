@@ -18,6 +18,49 @@ from collections.abc import Callable
 from sidol.node import Node
 
 
+def _container(
+    kind: str,
+    *children: Node,
+    spacing: int = 0,
+    min_w: int | None = None,
+    min_h: int | None = None,
+    max_w: int | None = None,
+    max_h: int | None = None,
+    padding: int = 0,
+    on_click: Callable[[], None] | None = None,
+    on_key: dict[str, Callable[..., object]] | None = None,
+    on_focus: Callable[..., object] | None = None,
+    focusable: bool = False,
+    role: str | None = None,
+    name: str | None = None,
+) -> Node:
+    """Shared body for ``Row``/``Column`` — they differ only in ``kind``.
+
+    ``role``/``name`` default to None (containers are presentation, not
+    semantics); composed widgets label their root container through them.
+    """
+    props: dict = {"spacing": spacing, "padding": padding}
+    if min_w is not None:
+        props["min_w"] = float(min_w)
+    if min_h is not None:
+        props["min_h"] = float(min_h)
+    if max_w is not None:
+        props["max_w"] = float(max_w)
+    if max_h is not None:
+        props["max_h"] = float(max_h)
+    return Node(
+        kind=kind,
+        props=props,
+        children=children,
+        on_click=on_click,
+        on_key=on_key,
+        on_focus=on_focus,
+        focusable=focusable,
+        role=role,
+        name=name,
+    )
+
+
 def Row(
     *children: Node,
     spacing: int = 0,
@@ -30,24 +73,24 @@ def Row(
     on_key: dict[str, Callable[..., object]] | None = None,
     on_focus: Callable[..., object] | None = None,
     focusable: bool = False,
+    role: str | None = None,
+    name: str | None = None,
 ) -> Node:
-    props: dict = {"spacing": spacing, "padding": padding}
-    if min_w is not None:
-        props["min_w"] = float(min_w)
-    if min_h is not None:
-        props["min_h"] = float(min_h)
-    if max_w is not None:
-        props["max_w"] = float(max_w)
-    if max_h is not None:
-        props["max_h"] = float(max_h)
-    return Node(
-        kind="row",
-        props=props,
-        children=children,
+    return _container(
+        "row",
+        *children,
+        spacing=spacing,
+        min_w=min_w,
+        min_h=min_h,
+        max_w=max_w,
+        max_h=max_h,
+        padding=padding,
         on_click=on_click,
         on_key=on_key,
         on_focus=on_focus,
         focusable=focusable,
+        role=role,
+        name=name,
     )
 
 
@@ -63,24 +106,24 @@ def Column(
     on_key: dict[str, Callable[..., object]] | None = None,
     on_focus: Callable[..., object] | None = None,
     focusable: bool = False,
+    role: str | None = None,
+    name: str | None = None,
 ) -> Node:
-    props: dict = {"spacing": spacing, "padding": padding}
-    if min_w is not None:
-        props["min_w"] = float(min_w)
-    if min_h is not None:
-        props["min_h"] = float(min_h)
-    if max_w is not None:
-        props["max_w"] = float(max_w)
-    if max_h is not None:
-        props["max_h"] = float(max_h)
-    return Node(
-        kind="column",
-        props=props,
-        children=children,
+    return _container(
+        "column",
+        *children,
+        spacing=spacing,
+        min_w=min_w,
+        min_h=min_h,
+        max_w=max_w,
+        max_h=max_h,
+        padding=padding,
         on_click=on_click,
         on_key=on_key,
         on_focus=on_focus,
         focusable=focusable,
+        role=role,
+        name=name,
     )
 
 

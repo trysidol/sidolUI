@@ -13,11 +13,80 @@ use unicode_width::UnicodeWidthStr;
 // Public types — callers construct LayoutNode trees and get back LayoutEntries
 // ---------------------------------------------------------------------------
 
+/// The supported node kinds — the single definition of what the engine
+/// accepts. The wire format is the `as_str()` spelling, sent by Python
+/// inside prop dicts and parsed once at the FFI boundary (`py_node_to_layout`
+/// in lib.rs): parsing IS validation. Every dispatch site (`create_taffy_node`,
+/// render paint/hit-test) matches exhaustively, so adding a variant
+/// compile-fails everywhere it must be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeKind {
+    /// The `Default` impl exists only so `LayoutNode: Default` (struct-update
+    /// syntax) keeps working; every real construction sets the kind.
+    #[default]
+    Column,
+    Row,
+    Spacer,
+    ScrollView,
+    Text,
+    Button,
+}
+
+impl std::str::FromStr for NodeKind {
+    type Err = String;
+
+    /// Parse the wire string exactly as Python sends it (case-sensitive).
+    /// The error is the user-facing message — one definition, shared by the
+    /// FFI boundary and tests.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "row" => Ok(NodeKind::Row),
+            "column" => Ok(NodeKind::Column),
+            "spacer" => Ok(NodeKind::Spacer),
+            "scroll_view" => Ok(NodeKind::ScrollView),
+            "text" => Ok(NodeKind::Text),
+            "button" => Ok(NodeKind::Button),
+            _ => Err(format!("unsupported node kind: {s}")),
+        }
+    }
+}
+
+impl NodeKind {
+    /// The wire spelling — round-trips through `FromStr`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeKind::Row => "row",
+            NodeKind::Column => "column",
+            NodeKind::Spacer => "spacer",
+            NodeKind::ScrollView => "scroll_view",
+            NodeKind::Text => "text",
+            NodeKind::Button => "button",
+        }
+    }
+}
+
+/// The style payload shared by every node kind — colour, state, and paint
+/// hints carried verbatim from the Python props dict through layout into
+/// the render entries. Pure data; extraction from props and dict
+/// materialisation are both derived from one schema table in lib.rs
+/// (`node_style_schema!`), so a new style property is one field here plus
+/// one schema row.
+#[derive(Debug, Clone, Default)]
+pub struct NodeStyle {
+    pub fg: String,
+    pub bg: String,
+    pub variant: String,
+    pub disabled: bool,
+    pub radius: f32,
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+}
+
 /// A declarative tree node, mirroring the Python `Node` dataclass.
 /// Pure data — no PyO3, no FFI, no lifetimes.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutNode {
-    pub kind: String,
+    pub kind: NodeKind,
     pub spacing: f32,
     pub min_w: Option<f32>,
     pub min_h: Option<f32>,
@@ -25,33 +94,21 @@ pub struct LayoutNode {
     pub max_h: Option<f32>,
     pub padding: f32,
     pub text: String,
-    pub fg: String,
-    pub bg: String,
-    pub variant: String,
-    pub disabled: bool,
-    pub radius: f32,
-    pub scroll_x: f32,
-    pub scroll_y: f32,
+    pub style: NodeStyle,
     pub children: Vec<LayoutNode>,
 }
 
 /// One computed layout rect — the output item for one tree node.
 #[derive(Debug, Clone)]
 pub struct LayoutEntry {
-    pub kind: String,
+    pub kind: NodeKind,
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub depth: usize,
     pub text: String,
-    pub fg: String,
-    pub bg: String,
-    pub variant: String,
-    pub disabled: bool,
-    pub radius: f32,
-    pub scroll_x: f32,
-    pub scroll_y: f32,
+    pub style: NodeStyle,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,32 +163,22 @@ pub fn compute_layout(
             h: layout.size.height,
             depth: entry.depth,
             text: entry.text,
-            fg: entry.fg,
-            bg: entry.bg,
-            variant: entry.variant,
-            disabled: entry.disabled,
-            radius: entry.radius,
-            scroll_x: entry.scroll_x,
-            scroll_y: entry.scroll_y,
+            style: entry.style,
         });
     }
 
     Ok(results)
 }
 
+// Unknown kinds cannot reach this layer: `LayoutNode.kind` is a `NodeKind`
+// parsed (and thereby validated) at the FFI boundary.
 fn validate_node(node: &LayoutNode) -> Result<(), String> {
-    if !matches!(
-        node.kind.as_str(),
-        "row" | "column" | "spacer" | "scroll_view" | "text" | "button"
-    ) {
-        return Err(format!("unsupported node kind: {}", node.kind));
-    }
     for (name, value) in [
         ("spacing", node.spacing),
         ("padding", node.padding),
-        ("radius", node.radius),
-        ("scroll_x", node.scroll_x),
-        ("scroll_y", node.scroll_y),
+        ("radius", node.style.radius),
+        ("scroll_x", node.style.scroll_x),
+        ("scroll_y", node.style.scroll_y),
     ] {
         if !value.is_finite() || value < 0.0 {
             return Err(format!("{name} must be finite and non-negative"));
@@ -172,16 +219,10 @@ fn validate_node(node: &LayoutNode) -> Result<(), String> {
 struct InternalEntry {
     taffy_id: NodeId,
     parent_index: Option<usize>,
-    kind: String,
+    kind: NodeKind,
     depth: usize,
     text: String,
-    fg: String,
-    bg: String,
-    variant: String,
-    disabled: bool,
-    radius: f32,
-    scroll_x: f32,
-    scroll_y: f32,
+    style: NodeStyle,
 }
 
 /// Recursively build taffy nodes from a `LayoutNode` tree.
@@ -208,16 +249,10 @@ fn build_node(
     entries[before] = Some(InternalEntry {
         taffy_id,
         parent_index,
-        kind: node.kind.clone(),
+        kind: node.kind,
         depth,
         text: node.text.clone(),
-        fg: node.fg.clone(),
-        bg: node.bg.clone(),
-        variant: node.variant.clone(),
-        disabled: node.disabled,
-        radius: node.radius,
-        scroll_x: node.scroll_x,
-        scroll_y: node.scroll_y,
+        style: node.style.clone(),
     });
 
     Ok(taffy_id)
@@ -247,8 +282,8 @@ fn create_taffy_node(
         ..Default::default()
     };
 
-    let base = match node.kind.as_str() {
-        "row" => Style {
+    let base = match node.kind {
+        NodeKind::Row => Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
             gap: Size {
@@ -257,7 +292,7 @@ fn create_taffy_node(
             },
             ..constraints
         },
-        "column" => Style {
+        NodeKind::Column => Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             gap: Size {
@@ -266,7 +301,7 @@ fn create_taffy_node(
             },
             ..constraints
         },
-        "scroll_view" => Style {
+        NodeKind::ScrollView => Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             overflow: Point {
@@ -275,11 +310,11 @@ fn create_taffy_node(
             },
             ..constraints
         },
-        "spacer" => Style {
+        NodeKind::Spacer => Style {
             flex_grow: 1.0,
             ..constraints
         },
-        "text" => {
+        NodeKind::Text => {
             let char_count = UnicodeWidthStr::width(node.text.as_str()).max(1);
             Style {
                 size: Size {
@@ -289,7 +324,7 @@ fn create_taffy_node(
                 ..constraints
             }
         }
-        "button" => {
+        NodeKind::Button => {
             let char_count = UnicodeWidthStr::width(node.text.as_str());
             let w = (char_count + 4).max(5) as f32;
             Style {
@@ -300,7 +335,6 @@ fn create_taffy_node(
                 ..constraints
             }
         }
-        _ => return Err(format!("unsupported node kind: {}", node.kind)),
     };
 
     if child_ids.is_empty() {
@@ -332,7 +366,7 @@ mod tests {
 
     fn text(content: &str) -> LayoutNode {
         LayoutNode {
-            kind: "text".into(),
+            kind: NodeKind::Text,
             text: content.into(),
             spacing: 0.0,
             ..Default::default()
@@ -341,7 +375,7 @@ mod tests {
 
     fn button(label: &str) -> LayoutNode {
         LayoutNode {
-            kind: "button".into(),
+            kind: NodeKind::Button,
             text: label.into(),
             spacing: 0.0,
             ..Default::default()
@@ -350,7 +384,7 @@ mod tests {
 
     fn row(children: Vec<LayoutNode>, spacing: f32) -> LayoutNode {
         LayoutNode {
-            kind: "row".into(),
+            kind: NodeKind::Row,
             spacing,
             children,
             ..Default::default()
@@ -359,7 +393,7 @@ mod tests {
 
     fn column(children: Vec<LayoutNode>, spacing: f32) -> LayoutNode {
         LayoutNode {
-            kind: "column".into(),
+            kind: NodeKind::Column,
             spacing,
             children,
             ..Default::default()
@@ -368,7 +402,7 @@ mod tests {
 
     fn spacer() -> LayoutNode {
         LayoutNode {
-            kind: "spacer".into(),
+            kind: NodeKind::Spacer,
             ..Default::default()
         }
     }
@@ -379,8 +413,8 @@ mod tests {
         let entries = compute_layout(&root, 400.0, 300.0).unwrap();
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].kind, "column");
-        assert_eq!(entries[1].kind, "text");
+        assert_eq!(entries[0].kind, NodeKind::Column);
+        assert_eq!(entries[1].kind, NodeKind::Text);
         assert_eq!(entries[0].depth, 0);
         assert_eq!(entries[1].depth, 1);
         assert!(entries[0].w > 0.0);
@@ -436,18 +470,36 @@ mod tests {
         let entries = compute_layout(&root, 400.0, 300.0).unwrap();
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].kind, "column");
+        assert_eq!(entries[0].kind, NodeKind::Column);
     }
 
     #[test]
-    fn layout_unknown_kind_is_rejected() {
-        let root = LayoutNode {
-            kind: "unknown".into(),
-            children: vec![text("child")],
-            ..Default::default()
-        };
-        let error = compute_layout(&root, 400.0, 300.0).unwrap_err();
+    fn node_kind_parse_rejects_unknown() {
+        let error = "unknown".parse::<NodeKind>().unwrap_err();
         assert_eq!(error, "unsupported node kind: unknown");
+    }
+
+    #[test]
+    fn node_kind_round_trips_wire_strings() {
+        for (wire, kind) in [
+            ("row", NodeKind::Row),
+            ("column", NodeKind::Column),
+            ("spacer", NodeKind::Spacer),
+            ("scroll_view", NodeKind::ScrollView),
+            ("text", NodeKind::Text),
+            ("button", NodeKind::Button),
+        ] {
+            assert_eq!(wire.parse::<NodeKind>().unwrap(), kind);
+            assert_eq!(kind.as_str(), wire);
+        }
+    }
+
+    #[test]
+    fn node_kind_parse_is_case_exact() {
+        // Python sends the exact wire spelling; no case folding.
+        assert!("Row".parse::<NodeKind>().is_err());
+        assert!("TEXT".parse::<NodeKind>().is_err());
+        assert!("Scroll_View".parse::<NodeKind>().is_err());
     }
 
     #[test]
@@ -460,7 +512,7 @@ mod tests {
         };
         let entries = compute_layout(&root, 400.0, 300.0).unwrap();
 
-        assert_eq!(entries[0].kind, "column");
+        assert_eq!(entries[0].kind, NodeKind::Column);
         assert!(
             entries[0].w >= 100.0,
             "width {} should be >= 100",
@@ -476,7 +528,7 @@ mod tests {
     #[test]
     fn layout_respects_max_size_constraint() {
         let root = LayoutNode {
-            kind: "row".into(),
+            kind: NodeKind::Row,
             max_w: Some(50.0),
             max_h: Some(10.0),
             children: vec![text("Hello World")],
@@ -491,7 +543,7 @@ mod tests {
     #[test]
     fn layout_padding_is_applied() {
         let root = LayoutNode {
-            kind: "column".into(),
+            kind: NodeKind::Column,
             padding: 10.0,
             children: vec![text("A")],
             ..Default::default()
@@ -518,15 +570,15 @@ mod tests {
     #[test]
     fn layout_scroll_view_is_container() {
         let root = LayoutNode {
-            kind: "scroll_view".into(),
+            kind: NodeKind::ScrollView,
             children: vec![text("content")],
             ..Default::default()
         };
         let entries = compute_layout(&root, 400.0, 300.0).unwrap();
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].kind, "scroll_view");
-        assert_eq!(entries[1].kind, "text");
+        assert_eq!(entries[0].kind, NodeKind::ScrollView);
+        assert_eq!(entries[1].kind, NodeKind::Text);
         assert_eq!(entries[0].depth, 0);
         assert_eq!(entries[1].depth, 1);
     }

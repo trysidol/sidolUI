@@ -6,6 +6,12 @@ reactive UI state. ``run_async`` runs a coroutine the same way — the asyncio
 event loop runs in a worker thread and results flow through the same
 ``pump_workers()``/``join()`` delivery path.
 
+``Worker.cancel()`` requests cancellation: the function may observe
+``is_cancelled()`` to exit early, and a joining thread that observes the
+cancellation suppresses ``on_done``/``commit`` delivery. ``cancel_all_workers()``
+cancels every in-flight worker — surfaces call it on hot-reload and teardown
+so a disposed app's background tasks cannot mutate the reloaded app.
+
 Usage::
 
     import time
@@ -85,6 +91,7 @@ class Worker:
         self._done = threading.Event()
         self._started = False
         self._completion_delivered = False
+        self._cancelled = False
 
     def start(self) -> None:
         """Launch the background thread. Non-blocking.
@@ -96,10 +103,32 @@ class Worker:
         with self._lock:
             if self._started:
                 raise RuntimeError("Worker can only be started once")
+            if self._cancelled:
+                raise RuntimeError("Worker was cancelled before start")
             self._started = True
         _active_workers.add(self)
         self._thread = threading.Thread(target=self._run, daemon=True, name="sidol-worker")
         self._thread.start()
+
+    def cancel(self) -> None:
+        """Request cancellation of this worker.
+
+        Python cannot kill a running thread, so cancellation is cooperative:
+        the worker function can poll ``is_cancelled()`` and return early.
+        When the joining thread observes the cancellation, ``join()``/
+        ``pump_workers()`` suppress ``on_done``/``commit`` delivery. Note the
+        guarantee is per-join, not absolute: a ``join()`` that read the
+        cancelled flag *before* ``cancel()`` was called on another thread
+        still delivers that one time. Idempotent and thread-safe.
+        """
+        with self._lock:
+            self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        """True once ``cancel()`` has been called. Poll from inside the
+        worker function to exit early on long-running work."""
+        with self._lock:
+            return self._cancelled
 
     def _run(self) -> None:
         try:
@@ -117,22 +146,31 @@ class Worker:
 
         If *flush* is provided (e.g. ``app.flush``), it is called after
         ``on_done`` so any state changes in the callback propagate.
+
+        If the worker was cancelled, ``on_done``/``commit`` are NOT
+        delivered — the worker is collected and the result is returned to the
+        caller (a cancelled worker may still return a value).
         """
         if not self._started:
             raise RuntimeError("Worker must be started before join")
         self._done.wait()
-        with self._lock:
-            if self._error is not None:
-                raise self._error
-            result = self._result
-            deliver = not self._completion_delivered
-            self._completion_delivered = True
-        if deliver:
-            if self._commit is not None:
-                self._commit()
-            if self._on_done is not None:
-                self._on_done(result)  # type: ignore[arg-type]
-        _active_workers.discard(self)
+        try:
+            with self._lock:
+                if self._error is not None:
+                    raise self._error
+                result = self._result
+                deliver = not self._completion_delivered and not self._cancelled
+                self._completion_delivered = True
+            if deliver:
+                if self._commit is not None:
+                    self._commit()
+                if self._on_done is not None:
+                    self._on_done(result)  # type: ignore[arg-type]
+        finally:
+            # Always unregister, even when re-raising the worker's error —
+            # otherwise a failed worker leaks in the registry and a later
+            # pump_workers() reports it a second time.
+            _active_workers.discard(self)
         if flush is not None:
             flush()
         return result  # type: ignore[return-value]
@@ -173,10 +211,23 @@ def pump_workers(flush: Callable[[], Any] | None = None) -> int:
             # Catch BaseException (not Exception) so a worker that raised
             # SystemExit/KeyboardInterrupt also can't kill the loop.
             print(f"[sidol] worker failed: {exc}", file=sys.stderr)
-        finally:
-            _active_workers.discard(worker)
         delivered += 1
     return delivered
+
+
+def cancel_all_workers() -> int:
+    """Request cancellation of every in-flight worker.
+
+    Surfaces call this on hot-reload and teardown so background tasks
+    started by a disposed app cannot deliver callbacks into the new one.
+    Returns the number of workers cancelled in this call. Threads run to
+    completion but ``on_done``/``commit`` delivery is suppressed.
+    """
+    cancelled = 0
+    for worker in list(_active_workers):
+        worker.cancel()
+        cancelled += 1
+    return cancelled
 
 
 def run_async(
