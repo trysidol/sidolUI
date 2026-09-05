@@ -148,6 +148,13 @@ threads run to completion, but their completion callbacks are neutralized
 because they write to disposed components. A `Worker.cancel()` primitive for
 eager abort is future work.
 
+`Worker.cancel()` is the eager-abort primitive: the running function can poll
+`is_cancelled()` to exit early, and `on_done`/`commit` delivery is suppressed
+regardless. Surfaces call `cancel_all_workers()` on reload swap and teardown so
+a disposed app's background tasks cannot mutate the reloaded app. Cancellation
+is cooperative — Python cannot kill a running thread — so a long-running
+function must cooperate to actually stop.
+
 ## Surface Strategy
 
 The shared framework core should define:
@@ -179,10 +186,12 @@ The terminal renderer must follow these rules:
   as a normal frame strategy.
 - Emit at most one write operation per rendered frame where the terminal
   protocol permits it.
-- Use the Synchronized Output protocol when the terminal supports it, with a
-  safe fallback when it does not.
-- Use `Fraction` or fixed-point arithmetic instead of floating-point arithmetic
-  for proportional terminal width and height calculations.
+- Wrap every frame paint in the Synchronized Output protocol (DECSET 2026);
+  terminals without support ignore the sequences and render unsynchronized —
+  the safe fallback.
+- Keep layout in f32 (taffy-native) and round deterministically — half-up — at
+  the single paint-boundary conversion point (`cell()` in render/mod.rs).
+  Fixed-point arithmetic is explicitly deferred (PLAN_10_OUT_OF_10.md).
 
 These rules exist to minimize flicker, reduce terminal I/O, and keep layout
 rounding deterministic.

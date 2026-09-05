@@ -327,6 +327,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use proptest::prelude::*;
+    use std::cmp::Ordering;
     use std::collections::BTreeSet;
 
     /// Normalize raw random pairs into a deduplicated, strictly
@@ -524,12 +525,10 @@ mod tests {
                 // generator never rejects.
                 let op: BoxedStrategy<Op> = if n >= 2 {
                     prop_oneof![
-                        3 => (0..n, 0..n).prop_map(|(a, b)| if a < b {
-                            Op::AddEdge(a, b)
-                        } else if a > b {
-                            Op::AddEdge(b, a)
-                        } else {
-                            Op::AddEdge(0, 1)
+                        3 => (0..n, 0..n).prop_map(|(a, b)| match a.cmp(&b) {
+                            Ordering::Less => Op::AddEdge(a, b),
+                            Ordering::Greater => Op::AddEdge(b, a),
+                            Ordering::Equal => Op::AddEdge(0, 1),
                         }),
                         4 => (0..n).prop_map(Op::MarkDirty),
                         2 => Just(Op::Drain),

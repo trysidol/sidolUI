@@ -13,6 +13,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
       - uses: astral-sh/setup-uv@v5
         with:
           version: latest
@@ -70,6 +73,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.85.0
+      - run: uv sync
       - run: uv run maturin build --release --out dist
       - run: uv venv /tmp/wheel-venv
       - run: uv pip install --python /tmp/wheel-venv dist/*.whl
